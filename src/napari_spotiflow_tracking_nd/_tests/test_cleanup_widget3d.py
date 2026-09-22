@@ -26,7 +26,7 @@ class TestPreProcessingWidget3DCreation:
             "_input_folder_edit", "_load_btn",
             "_pixel_size_xy_spin", "_voxel_size_z_spin", "_frame_interval_spin",
             "_image_combo", "_output_folder_edit",
-            "_bg_sigma_spin", "_bg_run_btn",
+            "_bg_sigma_spin", "_bg_use_gpu_check", "_bg_run_btn",
             "_blur_sigma_spin", "_blur_run_btn",
             "_calc_op_combo", "_calc_value_spin", "_calc_run_btn",
         ):

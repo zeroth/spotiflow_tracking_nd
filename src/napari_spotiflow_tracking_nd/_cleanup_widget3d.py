@@ -5,6 +5,7 @@ from pathlib import Path
 import napari
 from napari.utils.notifications import show_error, show_info
 from qtpy.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -104,6 +105,8 @@ class PreProcessingWidget3D(QWidget):
         self._bg_sigma_spin.setRange(0.1, 200.0)
         self._bg_sigma_spin.setValue(10.0)
         bg_layout.addWidget(self._bg_sigma_spin)
+        self._bg_use_gpu_check = QCheckBox("Use GPU")
+        bg_layout.addWidget(self._bg_use_gpu_check)
         self._bg_run_btn = QPushButton("Run")
         bg_layout.addWidget(self._bg_run_btn)
         layout.addWidget(bg_group)
@@ -258,9 +261,10 @@ class PreProcessingWidget3D(QWidget):
         # without changing this call site's signal wiring.
 
     def _run_remove_background(self):
+        device = "cuda" if self._bg_use_gpu_check.isChecked() else "cpu"
         self._run_op(
             remove_background_high_pass_3d,
-            {"sigma": self._bg_sigma_spin.value()},
+            {"sigma": self._bg_sigma_spin.value(), "device": device},
             f"bg s={self._bg_sigma_spin.value()}",
         )
 
