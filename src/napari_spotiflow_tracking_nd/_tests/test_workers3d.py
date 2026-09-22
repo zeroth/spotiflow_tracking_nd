@@ -26,7 +26,7 @@ class TestVolumeOpWorker3D:
             op_kwargs={"op": "add", "value": 5},
         )
         worker.progress.connect(lambda cur, total: progress_calls.append((cur, total)))
-        worker.finished.connect(lambda paths: finished.update(paths=paths))
+        worker.run_finished.connect(lambda paths: finished.update(paths=paths))
 
         worker.run()  # call directly — no real threading in the test
 
@@ -105,13 +105,56 @@ class TestDetectionWorker3D:
 
         finished = {}
         worker = DetectionWorker3D(files=files, model=model, csv_path=csv_path)
-        worker.finished.connect(lambda path: finished.update(path=path))
+        worker.run_finished.connect(lambda path: finished.update(path=path))
         worker.run()
 
         df = pd.read_csv(csv_path)
         assert list(df.columns) == ["frame", "z", "y", "x", "prob"]
         assert list(df["frame"]) == [0, 1]
         assert finished["path"] == str(csv_path)
+
+    def test_frame_column_is_written_as_integers_not_floats(self, tmp_path):
+        # Building the rows with a single np.hstack promotes the integer
+        # frame index to float64 alongside the coords/probabilities, so the
+        # CSV reads "0.0, 1.0, ..." instead of "0, 1, ...".
+        from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
+
+        in_dir = tmp_path / "in"
+        files = write_timepoint_folder(in_dir, n_timepoints=2, shape=(4, 8, 8))
+        csv_path = tmp_path / "spots.csv"
+
+        model = MagicMock()
+        details = MagicMock()
+        details.prob = np.array([0.8])
+        model.predict.return_value = (np.array([[1, 2, 3]]), details)
+
+        worker = DetectionWorker3D(files=files, model=model, csv_path=csv_path)
+        worker.run()
+
+        text = csv_path.read_text().splitlines()
+        assert text[1].split(",")[0] == "0"
+        assert text[2].split(",")[0] == "1"
+        df = pd.read_csv(csv_path)
+        assert df["frame"].dtype.kind == "i"
+
+    def test_run_finished_does_not_shadow_qthreads_own_finished_signal(self, tmp_path):
+        # QThread defines a no-argument `finished` signal; overriding it
+        # with a differently-shaped one breaks the moment anything calls
+        # `start()` instead of `run()`.
+        from qtpy.QtCore import QThread
+
+        from napari_spotiflow_tracking_nd._workers3d import (
+            DetectionWorker3D,
+            VolumeOpWorker3D,
+        )
+
+        for cls in (VolumeOpWorker3D, DetectionWorker3D):
+            assert "finished" not in vars(cls)
+            assert "run_finished" in vars(cls)
+            # …and the two signals we deliberately did not rename really
+            # aren't QThread built-ins.
+            assert not hasattr(QThread, "progress")
+            assert not hasattr(QThread, "errored")
 
     def test_frame_with_no_spots_writes_no_rows_for_that_frame(self, tmp_path):
         from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D

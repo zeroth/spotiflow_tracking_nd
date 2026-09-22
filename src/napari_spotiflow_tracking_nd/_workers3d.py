@@ -22,7 +22,11 @@ class VolumeOpWorker3D(QThread):
     """
 
     progress = Signal(int, int)  # (current, total), 1-indexed current
-    finished = Signal(list)      # output paths, as str, in input order
+    # Named `run_finished`, not `finished`: `QThread` already defines a
+    # no-argument `finished` signal, and overriding it with a different
+    # signature would collide the moment anything calls `start()` instead
+    # of `run()`. (`progress`/`errored` are not `QThread` built-ins.)
+    run_finished = Signal(list)  # output paths, as str, in input order
     errored = Signal(str)
 
     def __init__(self, files: list[Path], output_dir: Path, op, op_kwargs: dict, parent=None):
@@ -50,7 +54,7 @@ class VolumeOpWorker3D(QThread):
                 tifffile.imwrite(str(out_path), result)
                 written.append(str(out_path))
                 self.progress.emit(i + 1, total)
-            self.finished.emit(written)
+            self.run_finished.emit(written)
         except Exception as exc:
             self.errored.emit(str(exc))
 
@@ -62,7 +66,8 @@ class DetectionWorker3D(QThread):
     """
 
     progress = Signal(int, int)  # (current, total), 1-indexed current
-    finished = Signal(str)       # the CSV path written
+    # `run_finished`, not `finished` — see `VolumeOpWorker3D` for why.
+    run_finished = Signal(str)   # the CSV path written
     errored = Signal(str)
 
     def __init__(
@@ -101,13 +106,23 @@ class DetectionWorker3D(QThread):
                     min_distance=self._min_distance,
                 )
                 if len(points) > 0:
-                    frame_col = np.full((len(points), 1), t)
-                    prob_col = np.asarray(details.prob).reshape(-1, 1)
-                    rows = np.hstack([frame_col, points, prob_col])
-                    df = pd.DataFrame(rows, columns=["frame", "z", "y", "x", "prob"])
+                    coords = np.asarray(points)
+                    # Built column-by-column, not as one `np.hstack` block:
+                    # hstacking the integer frame index with float coords
+                    # and probabilities promotes everything to float64, and
+                    # the CSV's `frame` column comes out as `0.0, 1.0, ...`.
+                    df = pd.DataFrame(
+                        {
+                            "frame": np.full(len(coords), t, dtype=np.int64),
+                            "z": coords[:, 0],
+                            "y": coords[:, 1],
+                            "x": coords[:, 2],
+                            "prob": np.asarray(details.prob).reshape(-1),
+                        }
+                    )
                     df.to_csv(self._csv_path, mode="a", header=not header_written, index=False)
                     header_written = True
                 self.progress.emit(t + 1, total)
-            self.finished.emit(str(self._csv_path))
+            self.run_finished.emit(str(self._csv_path))
         except Exception as exc:
             self.errored.emit(str(exc))
