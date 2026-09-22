@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -31,6 +32,21 @@ class TestDetectionWidget3DCreation:
             "_csv_path_edit", "_browse_csv_btn", "_run_btn", "_progress_bar",
         ):
             assert hasattr(widget, attr), f"missing {attr}"
+
+    def test_combo_is_populated_for_layers_that_existed_before_construction(
+        self, make_napari_viewer
+    ):
+        # The normal workflow loads the folder in the Pre-Processing widget
+        # *before* this one is opened, so `layers.events.inserted` has
+        # already fired and the combo would otherwise start empty.
+        from napari_spotiflow_tracking_nd._detection_widget3d import DetectionWidget3D
+
+        viewer = make_napari_viewer()
+        viewer.add_image(np.zeros((2, 4, 8, 8), dtype=np.uint16), name="already_here")
+
+        widget = DetectionWidget3D(viewer)
+
+        assert widget._image_combo.currentText() == "already_here"
 
 
 class TestRunDetection:
@@ -119,3 +135,129 @@ class TestRunDetection:
         assert not csv_path.exists()
         points_layers = [l for l in viewer.layers if l.__class__.__name__ == "Points"]
         assert len(points_layers) == 0
+
+    def test_a_failing_load_model_shows_an_error_instead_of_raising(
+        self, detection_widget, tmp_path
+    ):
+        # A bad model name, a missing checkpoint folder or a failed weight
+        # download must not raise straight out of a Qt slot.
+        widget, viewer = detection_widget
+        files = write_timepoint_folder(tmp_path / "in", n_timepoints=1, shape=(4, 16, 16))
+
+        viewer.add_image(
+            np.zeros((1, 4, 16, 16), dtype=np.uint16),
+            name="vol",
+            metadata={"source_files": files},
+        )
+        widget._image_combo.setCurrentText("vol")
+        widget._model_name_edit.setText("no_such_model")
+        widget._csv_path_edit.setText(str(tmp_path / "spots.csv"))
+
+        with patch(
+            "napari_spotiflow_tracking_nd._detection_widget3d.load_model",
+            side_effect=RuntimeError("no weights for you"),
+        ), patch(
+            "napari_spotiflow_tracking_nd._detection_widget3d.show_error"
+        ) as mock_show_error:
+            widget._run_detection()  # must not raise
+
+        assert mock_show_error.called
+        assert "no weights for you" in " ".join(
+            str(c) for c in mock_show_error.call_args_list
+        )
+        assert not (tmp_path / "spots.csv").exists()
+
+
+class TestCalibrationIsThreadedThrough:
+    """`frame_interval_s` and the two spatial calibrations have to reach the
+    run's outputs — later phases turn pixel/frame track properties into
+    physical units, and the CSV alone carries no calibration at all."""
+
+    @staticmethod
+    def _run(widget, viewer, tmp_path, calibration):
+        files = write_timepoint_folder(tmp_path / "in", n_timepoints=2, shape=(4, 16, 16))
+        viewer.add_image(
+            np.zeros((2, 4, 16, 16), dtype=np.uint16),
+            name="vol",
+            scale=(1.0, 0.210, 0.104, 0.104),
+            metadata={"source_files": files, **calibration},
+        )
+        widget._image_combo.setCurrentText("vol")
+        widget._model_name_edit.setText("synth_3d")
+        widget._csv_path_edit.setText(str(tmp_path / "spots.csv"))
+        widget._run_detection()
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_points_layer_metadata_carries_the_calibration(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        mock_model = MagicMock()
+        details = MagicMock()
+        details.prob = np.array([0.8])
+        mock_model.predict.return_value = (np.array([[1, 2, 3]]), details)
+        mock_load_model.return_value = mock_model
+
+        self._run(
+            widget, viewer, tmp_path,
+            {"pixel_size_xy_um": 0.104, "voxel_size_z_um": 0.210,
+             "frame_interval_s": 2.5},
+        )
+
+        points = [l for l in viewer.layers if l.__class__.__name__ == "Points"][0]
+        assert points.metadata["csv_path"] == str(tmp_path / "spots.csv")
+        assert points.metadata["pixel_size_xy_um"] == 0.104
+        assert points.metadata["voxel_size_z_um"] == 0.210
+        assert points.metadata["frame_interval_s"] == 2.5
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_a_json_sidecar_records_the_calibration_next_to_the_csv(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        from napari_spotiflow_tracking_nd._detection_widget3d import (
+            calibration_sidecar_path,
+        )
+
+        widget, viewer = detection_widget
+        mock_model = MagicMock()
+        details = MagicMock()
+        details.prob = np.array([0.8])
+        mock_model.predict.return_value = (np.array([[1, 2, 3]]), details)
+        mock_load_model.return_value = mock_model
+
+        self._run(
+            widget, viewer, tmp_path,
+            {"pixel_size_xy_um": 0.104, "voxel_size_z_um": 0.210,
+             "frame_interval_s": 2.5},
+        )
+
+        sidecar = calibration_sidecar_path(tmp_path / "spots.csv")
+        assert sidecar == tmp_path / "spots.json"
+        assert json.loads(sidecar.read_text()) == {
+            "pixel_size_xy_um": 0.104,
+            "voxel_size_z_um": 0.210,
+            "frame_interval_s": 2.5,
+        }
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_uncalibrated_run_records_nulls_rather_than_omitting_keys(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        from napari_spotiflow_tracking_nd._detection_widget3d import (
+            calibration_sidecar_path,
+        )
+
+        widget, viewer = detection_widget
+        mock_model = MagicMock()
+        details = MagicMock()
+        details.prob = np.array([0.8])
+        mock_model.predict.return_value = (np.array([[1, 2, 3]]), details)
+        mock_load_model.return_value = mock_model
+
+        self._run(widget, viewer, tmp_path, {})
+
+        assert json.loads(calibration_sidecar_path(tmp_path / "spots.csv").read_text()) == {
+            "pixel_size_xy_um": None,
+            "voxel_size_z_um": None,
+            "frame_interval_s": None,
+        }
