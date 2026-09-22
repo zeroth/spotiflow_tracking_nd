@@ -5,6 +5,11 @@ contributions:
     - id: napari-spotiflow-tracking-nd.preprocessing_widget
       python_name: napari_spotiflow_tracking_nd._cleanup_widget3d:PreProcessingWidget3D
       title: Pre-Processing
+    - id: napari-spotiflow-tracking-nd.detection_widget
+      python_name: napari_spotiflow_tracking_nd._detection_widget3d:DetectionWidget3D
+      title: Spot Detection
   widgets:
     - command: napari-spotiflow-tracking-nd.preprocessing_widget
       display_name: Pre-Processing
+    - command: napari-spotiflow-tracking-nd.detection_widget
+      display_name: Spot Detection
