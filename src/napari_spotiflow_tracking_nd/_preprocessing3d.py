@@ -64,7 +64,7 @@ def remove_background_high_pass_3d(
         import torch
         import torch.nn.functional as F
         return _remove_background_torch_3d(volume, sigma_z, sigma_y, sigma_x, device, torch, F)
-    except ImportError:
+    except (ImportError, OSError):
         from scipy.ndimage import gaussian_filter
         background = gaussian_filter(
             volume.astype(np.float64), sigma=(sigma_z, sigma_y, sigma_x)
