@@ -19,12 +19,6 @@ dependencies = [
     "tifffile",
 ]
 
-[project.urls]
-Homepage = "https://github.com/"
-Documentation = "https://github.com/"
-Repository = "https://github.com/"
-Issues = "https://github.com/"
-
 [project.optional-dependencies]
 testing = [
     "pytest",
