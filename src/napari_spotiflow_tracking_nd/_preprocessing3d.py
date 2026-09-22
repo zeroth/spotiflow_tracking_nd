@@ -74,17 +74,19 @@ def remove_background_high_pass_3d(
 
 def _remove_background_torch_3d(volume, sigma_z, sigma_y, sigma_x, device, torch, F):
     """Separable 3D Gaussian background subtraction via torch conv3d."""
+    dim_z, dim_y, dim_x = volume.shape
 
-    def _kernel(sigma):
+    def _kernel(sigma, dim_size):
         radius = max(int(np.ceil(sigma * 2)), 1)
+        radius = min(radius, max(dim_size - 1, 0))
         size = 2 * radius + 1
         t = torch.linspace(-2, 2, size, dtype=torch.float32)
         h = torch.exp(-t ** 2)
         return h / h.sum(), radius
 
-    kz, rz = _kernel(sigma_z)
-    ky, ry = _kernel(sigma_y)
-    kx, rx = _kernel(sigma_x)
+    kz, rz = _kernel(sigma_z, dim_z)
+    ky, ry = _kernel(sigma_y, dim_y)
+    kx, rx = _kernel(sigma_x, dim_x)
 
     wz = kz.reshape(1, 1, -1, 1, 1)
     wy = ky.reshape(1, 1, 1, -1, 1)

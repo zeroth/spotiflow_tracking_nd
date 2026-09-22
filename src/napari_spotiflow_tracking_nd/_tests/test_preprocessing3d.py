@@ -70,6 +70,22 @@ class TestRemoveBackgroundHighPass3D:
         assert out.dtype == np.float32
         assert out.min() < 0
 
+    def test_thin_volume_does_not_crash_on_padding(self, backend):
+        from napari_spotiflow_tracking_nd._preprocessing3d import (
+            remove_background_high_pass_3d,
+        )
+
+        # Regression test for torch padding failure on thin volumes.
+        # A (4, 32, 32) volume with sigma=3.0 would produce radius=6 in the
+        # torch path, which is > dim_size for Z. The fix clamps radius to
+        # dim_size-1 to ensure F.pad() doesn't crash.
+        vol = np.full((4, 32, 32), 100, dtype=np.uint16)
+        vol[1:3, 12:20, 12:20] = 3000
+
+        out = remove_background_high_pass_3d(vol, sigma=3.0)
+        assert out.shape == vol.shape
+        assert out.dtype == vol.dtype
+
 
 class TestGaussianBlur3D:
     def test_blurs_and_preserves_dtype(self):
