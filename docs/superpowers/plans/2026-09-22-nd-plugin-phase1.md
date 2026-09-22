@@ -1260,7 +1260,10 @@ class TestLoadFolder:
         assert len(viewer.layers) == 1
         layer = viewer.layers[0]
         assert layer.data.shape == (3, 4, 8, 8)
-        assert layer.scale == (1.0, 0.210, 0.104, 0.104)
+        # napari's layer.scale is a numpy array — compare via tuple(), never
+        # bare `==` (a multi-element array in a bare assert raises
+        # "truth value ambiguous", not a clean test failure).
+        assert tuple(layer.scale) == (1.0, 0.210, 0.104, 0.104)
         assert len(layer.metadata["source_files"]) == 3
 
     def test_load_folder_without_calibration_uses_unit_scale(self, preproc_widget, tmp_path):
