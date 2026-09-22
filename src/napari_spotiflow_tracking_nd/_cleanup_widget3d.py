@@ -20,8 +20,13 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from napari_spotiflow_tracking_nd._io3d import compute_layer_scale, load_folder_as_lazy_stack
+from napari_spotiflow_tracking_nd._io3d import (
+    build_lazy_stack_from_files,
+    compute_layer_scale,
+    load_folder_as_lazy_stack,
+)
 from napari_spotiflow_tracking_nd._preprocessing3d import (
+    _get_device,
     apply_calculation,
     gaussian_blur_3d,
     remove_background_high_pass_3d,
@@ -141,6 +146,12 @@ class PreProcessingWidget3D(QWidget):
         # ── Progress ─────────────────────────────────────────────────
         self._progress_bar = QProgressBar()
         layout.addWidget(self._progress_bar)
+        self._blocking_note = QLabel(
+            "Note: a run blocks the napari window until it finishes (Phase 1 "
+            "runs synchronously). It is working, not hung."
+        )
+        self._blocking_note.setWordWrap(True)
+        layout.addWidget(self._blocking_note)
         layout.addStretch()
 
     def _connect_events(self):
@@ -149,6 +160,10 @@ class PreProcessingWidget3D(QWidget):
         self._bg_run_btn.clicked.connect(self._run_remove_background)
         self._blur_run_btn.clicked.connect(self._run_gaussian_blur)
         self._calc_run_btn.clicked.connect(self._run_arithmetic)
+        # Populate once up front: `layers.events.inserted` only fires for
+        # layers added *after* this point, so a widget opened on a viewer
+        # that already has images would otherwise start with an empty combo.
+        self._refresh_image_combo()
 
     def _refresh_image_combo(self, event=None):
         current = self._image_combo.currentText()
@@ -179,7 +194,11 @@ class PreProcessingWidget3D(QWidget):
             return
         try:
             stack, files = load_folder_as_lazy_stack(folder)
-        except (FileNotFoundError, ValueError) as exc:
+        except (OSError, ValueError) as exc:
+            # `OSError` covers `FileNotFoundError` and the permission /
+            # unreadable-file errors; `ValueError` covers a ragged series,
+            # a 2D file, a missing `_T_<n>_` token, and `tifffile`'s own
+            # `TiffFileError` (a `ValueError` subclass) on a corrupt header.
             show_error(str(exc))
             return
 
@@ -211,23 +230,51 @@ class PreProcessingWidget3D(QWidget):
             return None
         return self.viewer.layers[name]
 
-    def _get_output_dir(self) -> Path | None:
+    def _get_output_dir(self, layer=None) -> Path | None:
+        """The validated output directory, or None (after `show_error`).
+
+        `VolumeOpWorker3D` writes `output_dir / path.name`, mirroring the
+        input filenames exactly, so an output folder that *is* the input
+        folder would overwrite the source acquisition in place, file by
+        file, with no confirmation and no undo. Both folder pickers are
+        adjacent `Browse…` dialogs, so that slip is a plausible one; it is
+        refused here, before any worker is constructed.
+        """
         folder = self._output_folder_edit.text()
         if not folder:
             show_error("No output folder selected.")
             return None
-        return Path(folder)
+
+        try:
+            out = Path(folder).resolve()
+        except OSError as exc:
+            show_error(str(exc))
+            return None
+
+        src_files = layer.metadata.get("source_files") if layer is not None else None
+        if src_files:
+            try:
+                src_dir = Path(src_files[0]).resolve().parent
+            except OSError:
+                src_dir = None
+            if src_dir is not None and out == src_dir:
+                show_error(
+                    "Output folder is the input folder — pick a different one "
+                    "to avoid overwriting your source data."
+                )
+                return None
+        return out
 
     def _run_op(self, op, op_kwargs: dict, suffix: str):
         layer = self._get_input_layer()
         if layer is None:
             return
-        output_dir = self._get_output_dir()
-        if output_dir is None:
-            return
         files = layer.metadata.get("source_files")
         if not files:
             show_error("Selected layer has no source files (load it via 'Load Folder').")
+            return
+        output_dir = self._get_output_dir(layer)
+        if output_dir is None:
             return
 
         self._progress_bar.setMaximum(len(files))
@@ -240,7 +287,16 @@ class PreProcessingWidget3D(QWidget):
         def _on_finished(written_paths):
             if not written_paths:
                 return
-            stack, out_files = load_folder_as_lazy_stack(output_dir)
+            # Built from the exact list this run wrote, not from a fresh
+            # glob of `output_dir`: an unrelated `.tif` left in that folder
+            # would otherwise silently join the new layer, or raise a
+            # shape-mismatch ValueError out of this signal handler.
+            try:
+                stack, out_files = build_lazy_stack_from_files(written_paths)
+            except (OSError, ValueError) as exc:
+                show_error(f"Wrote {len(written_paths)} volumes, but could not "
+                           f"load them back as a layer: {exc}")
+                return
             self.viewer.add_image(
                 stack,
                 name=f"{layer.name} ({suffix})",
@@ -254,14 +310,16 @@ class PreProcessingWidget3D(QWidget):
             )
             show_info(f"Wrote {len(written_paths)} volumes to {output_dir}")
 
-        worker.finished.connect(_on_finished)
+        worker.run_finished.connect(_on_finished)
         self._worker = worker
         worker.run()  # Phase 1: run synchronously on the calling thread; the
         # `QThread` API is kept so a future phase can switch to `worker.start()`
         # without changing this call site's signal wiring.
 
     def _run_remove_background(self):
-        device = "cuda" if self._bg_use_gpu_check.isChecked() else "cpu"
+        # `_get_device` falls back to "cpu" when CUDA isn't actually
+        # available, instead of erroring deep inside the torch call.
+        device = _get_device(use_gpu=self._bg_use_gpu_check.isChecked())
         self._run_op(
             remove_background_high_pass_3d,
             {"sigma": self._bg_sigma_spin.value(), "device": device},
