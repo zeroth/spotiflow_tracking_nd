@@ -51,6 +51,52 @@ class TestProbeVolumeShape:
         assert shape == (5, 10, 12)
         assert dtype == np.uint16
 
+    def test_a_2d_tiff_raises_instead_of_silently_becoming_a_timepoint(self, tmp_path):
+        # A folder of 2D planes would otherwise build a (T, Y, X) stack that
+        # then gets a 4-element `scale` handed to `add_image` on 3-dim data —
+        # an opaque napari error instead of a clear message here.
+        from napari_spotiflow_tracking_nd._io3d import probe_volume_shape
+
+        path = tmp_path / "plane_T_000_C_00.tif"
+        tifffile.imwrite(str(path), np.zeros((10, 12), dtype=np.uint16))
+
+        with pytest.raises(ValueError, match="3D"):
+            probe_volume_shape(path)
+
+
+class TestBuildLazyStackFromFiles:
+    def test_uses_only_the_given_files_not_the_whole_folder(self, tmp_path):
+        from napari_spotiflow_tracking_nd._io3d import build_lazy_stack_from_files
+
+        paths = write_timepoint_folder(tmp_path, n_timepoints=2, shape=(4, 8, 8))
+        # An unrelated volume of a *different* shape in the same folder: a
+        # folder glob would pick it up and raise; an explicit list must not.
+        tifffile.imwrite(str(tmp_path / "other_T_099_C_00.tif"),
+                         np.zeros((8, 16, 16), dtype=np.uint16))
+
+        stack, files = build_lazy_stack_from_files(paths)
+
+        assert stack.shape == (2, 4, 8, 8)
+        assert files == paths
+
+    def test_accepts_string_paths_and_returns_path_objects(self, tmp_path):
+        from pathlib import Path
+
+        from napari_spotiflow_tracking_nd._io3d import build_lazy_stack_from_files
+
+        paths = write_timepoint_folder(tmp_path, n_timepoints=2, shape=(4, 8, 8))
+
+        stack, files = build_lazy_stack_from_files([str(p) for p in paths])
+
+        assert stack.shape == (2, 4, 8, 8)
+        assert all(isinstance(f, Path) for f in files)
+
+    def test_empty_file_list_raises(self):
+        from napari_spotiflow_tracking_nd._io3d import build_lazy_stack_from_files
+
+        with pytest.raises(ValueError):
+            build_lazy_stack_from_files([])
+
 
 class TestLoadFolderAsLazyStack:
     def test_builds_a_lazy_t_z_y_x_stack(self, tmp_path):

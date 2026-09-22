@@ -39,17 +39,36 @@ def list_timepoint_files(folder: str | Path, pattern: str = "*.tif") -> list[Pat
 
 def probe_volume_shape(path: str | Path) -> tuple[tuple[int, int, int], np.dtype]:
     """Read a (Z, Y, X) volume's shape and dtype from its TIFF header,
-    without decoding pixel data."""
+    without decoding pixel data.
+
+    Raises:
+        ValueError: the file is not a 3D (Z, Y, X) volume. Pointing the
+            loader at a folder of 2D planes would otherwise build a
+            (T, Y, X) stack that later gets a 4-element `scale`, failing
+            deep inside napari instead of here with a clear message.
+    """
     with tifffile.TiffFile(str(path)) as tf:
         series = tf.series[0]
-        return tuple(series.shape), series.dtype
+        shape = tuple(series.shape)
+        if len(shape) != 3:
+            raise ValueError(
+                f"Expected a 3D (Z, Y, X) volume, got shape {shape} from "
+                f"{Path(path).name!r}; this plugin streams one 3D volume "
+                "per timepoint file."
+            )
+        return shape, series.dtype
 
 
-def load_folder_as_lazy_stack(
-    folder: str | Path, pattern: str = "*.tif"
+def build_lazy_stack_from_files(
+    files: list[str | Path],
 ) -> tuple[da.Array, list[Path]]:
-    """Build a lazy (T, Z, Y, X) dask array over a folder of per-timepoint
-    TIFFs, one delayed block per file, ordered by `_T_<n>_`.
+    """Build a lazy (T, Z, Y, X) dask array over an explicit, already-ordered
+    list of per-timepoint TIFFs, one delayed block per file.
+
+    `load_folder_as_lazy_stack` is this plus a folder glob; callers that
+    already hold the exact file list (a worker's written outputs, say)
+    should use this so an unrelated `.tif` sitting in the same folder
+    can't silently join the series.
 
     Every file's (shape, dtype) is checked against the first file's; a
     mismatch raises `ValueError` naming the offending file rather than
@@ -57,8 +76,14 @@ def load_folder_as_lazy_stack(
 
     Returns:
         (stack, files) where `files[t]` is the source path for `stack[t]`.
+
+    Raises:
+        ValueError: `files` is empty, or a file's (shape, dtype) differs
+            from the first file's.
     """
-    files = list_timepoint_files(folder, pattern)
+    files = [Path(f) for f in files]
+    if not files:
+        raise ValueError("No files given; cannot build a timeseries stack.")
     ref_shape, ref_dtype = probe_volume_shape(files[0])
 
     blocks = []
@@ -76,6 +101,23 @@ def load_folder_as_lazy_stack(
         blocks.append(block)
 
     return da.stack(blocks, axis=0), files
+
+
+def load_folder_as_lazy_stack(
+    folder: str | Path, pattern: str = "*.tif"
+) -> tuple[da.Array, list[Path]]:
+    """Build a lazy (T, Z, Y, X) dask array over a folder of per-timepoint
+    TIFFs, ordered by the `_T_<n>_` token in each filename.
+
+    Returns:
+        (stack, files) where `files[t]` is the source path for `stack[t]`.
+
+    Raises:
+        FileNotFoundError: no file in `folder` matches `pattern`.
+        ValueError: a file has no `_T_<n>_` token, is not 3D, or does not
+            match the first file's (shape, dtype).
+    """
+    return build_lazy_stack_from_files(list_timepoint_files(folder, pattern))
 
 
 def compute_layer_scale(
