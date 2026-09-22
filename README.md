@@ -5,8 +5,8 @@ detection and tracking, built for datasets too large to hold in memory:
 one TIFF per timepoint, `(Z, Y, X)` per file, streamed one volume at a
 time.
 
-Sibling project: [napari-spotiflow-tracking](https://github.com/) — the
-2D (single-plane, whole-movie-in-RAM) version this plugin is ported from.
+Sibling project: napari-spotiflow-tracking — the 2D (single-plane,
+whole-movie-in-RAM) version this plugin is ported from.
 
 ## Status: Phase 1
 
@@ -20,7 +20,17 @@ Sibling project: [napari-spotiflow-tracking](https://github.com/) — the
 - **Spot detection** — [Spotiflow](https://github.com/weigertlab/spotiflow)
   3D models (`synth_3d`, `smfish_3d`, or a custom checkpoint), run per
   volume, exported to a CSV (`frame, z, y, x, prob`) and loaded back as a
-  Points layer.
+  Points layer. The calibration in force for the run is written beside the
+  CSV as a JSON sidecar (`spots.csv` → `spots.json`) and carried on the
+  Points layer's metadata.
+
+> **A run blocks the napari window for its full duration.** Phase 1
+> deliberately runs each pre-processing / detection job synchronously
+> (`worker.run()`, not `worker.start()`), so napari stops repainting until
+> the last timepoint is written — on a large acquisition that can be many
+> minutes. It is working, not hung; watch the output folder (or the CSV)
+> growing. Background execution with a live progress bar and a working
+> Cancel button is Phase 2.
 
 Deferred to later phases: tracking (trackpy, 3D), track-property/step
 analysis, PAPA (not planned), N2V denoise, walking average, erosion
