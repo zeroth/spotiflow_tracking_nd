@@ -145,6 +145,13 @@ class DetectionWidget3D(QWidget):
         worker.errored.connect(show_error)
 
         def _on_finished(written_csv_path):
+            # `DetectionWorker3D` only writes the CSV once at least one
+            # frame has a detection — if every frame in the run has zero
+            # spots, the file is never created even though `finished`
+            # still fires with its path.
+            if not Path(written_csv_path).exists():
+                show_info("Detection finished — no spots found.")
+                return
             df = pd.read_csv(written_csv_path)
             if len(df) == 0:
                 show_info("Detection finished — no spots found.")

@@ -79,3 +79,43 @@ class TestRunDetection:
         widget._run_detection()  # must not raise
 
         assert not (tmp_path / "spots.csv").exists()
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_zero_spots_in_every_frame_does_not_raise(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        # DetectionWorker3D only writes the CSV once at least one frame has
+        # a detection, so an all-empty run means `finished` fires with a
+        # path to a CSV that was never created. `_on_finished` must handle
+        # that gracefully instead of letting `pd.read_csv` raise
+        # FileNotFoundError out of the synchronous `worker.run()` call.
+        widget, viewer = detection_widget
+        files = write_timepoint_folder(tmp_path / "in", n_timepoints=2, shape=(4, 16, 16))
+
+        mock_model = MagicMock()
+        details_empty = MagicMock()
+        details_empty.prob = np.empty((0,))
+        mock_model.predict.side_effect = [
+            (np.empty((0, 3)), details_empty),
+            (np.empty((0, 3)), details_empty),
+        ]
+        mock_load_model.return_value = mock_model
+
+        viewer.add_image(
+            np.zeros((2, 4, 16, 16), dtype=np.uint16),
+            name="vol",
+            scale=(1.0, 0.210, 0.104, 0.104),
+            metadata={"source_files": files},
+        )
+        widget._image_combo.clear()
+        widget._image_combo.addItem("vol")
+        widget._image_combo.setCurrentText("vol")
+        widget._model_name_edit.setText("synth_3d")
+        csv_path = tmp_path / "spots.csv"
+        widget._csv_path_edit.setText(str(csv_path))
+
+        widget._run_detection()  # must not raise
+
+        assert not csv_path.exists()
+        points_layers = [l for l in viewer.layers if l.__class__.__name__ == "Points"]
+        assert len(points_layers) == 0
