@@ -1,0 +1,10 @@
+name: napari-spotiflow-tracking-nd
+display_name: Spotiflow ND Tracking
+contributions:
+  commands:
+    - id: napari-spotiflow-tracking-nd.preprocessing_widget
+      python_name: napari_spotiflow_tracking_nd._cleanup_widget3d:PreProcessingWidget3D
+      title: Pre-Processing
+  widgets:
+    - command: napari-spotiflow-tracking-nd.preprocessing_widget
+      display_name: Pre-Processing
