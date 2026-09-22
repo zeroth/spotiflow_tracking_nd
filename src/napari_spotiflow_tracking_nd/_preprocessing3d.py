@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
+
+# Kernels are truncated at `_TRUNCATE * sigma`, matching the default of
+# `scipy.ndimage.gaussian_filter` (truncate=4.0) so the torch path and the
+# scipy fallback apply the *same* filter for the same `sigma`.
+_TRUNCATE = 4.0
 
 
 def _get_device(use_gpu: bool = False) -> str:
@@ -8,10 +15,11 @@ def _get_device(use_gpu: bool = False) -> str:
     if use_gpu:
         try:
             import torch
-            if torch.cuda.is_available():
-                return "cuda"
-        except ImportError:
-            pass
+        except (ImportError, OSError):
+            # No torch, or a torch whose native libraries won't load.
+            return "cpu"
+        if torch.cuda.is_available():
+            return "cuda"
     return "cpu"
 
 
@@ -60,10 +68,15 @@ def remove_background_high_pass_3d(
         input dtype.
     """
     sigma_z, sigma_y, sigma_x = _sigma_zyx(sigma)
+
+    # Only the *imports* are guarded: a torch that isn't installed, or one
+    # whose native libraries won't load (Windows `OSError`), means "use
+    # scipy". An error raised once we're inside `_remove_background_torch_3d`
+    # — a genuine CUDA driver fault, say, or a bug here — must propagate,
+    # not be silently rerouted to a different (CPU) code path.
     try:
         import torch
         import torch.nn.functional as F
-        return _remove_background_torch_3d(volume, sigma_z, sigma_y, sigma_x, device, torch, F)
     except (ImportError, OSError):
         from scipy.ndimage import gaussian_filter
         background = gaussian_filter(
@@ -71,22 +84,48 @@ def remove_background_high_pass_3d(
         )
         return _rebaseline(volume.astype(np.float64) - background, volume)
 
+    return _remove_background_torch_3d(
+        volume, sigma_z, sigma_y, sigma_x, device, torch, F
+    )
+
 
 def _remove_background_torch_3d(volume, sigma_z, sigma_y, sigma_x, device, torch, F):
     """Separable 3D Gaussian background subtraction via torch conv3d."""
     dim_z, dim_y, dim_x = volume.shape
 
-    def _kernel(sigma, dim_size):
-        radius = max(int(np.ceil(sigma * 2)), 1)
-        radius = min(radius, max(dim_size - 1, 0))
-        size = 2 * radius + 1
-        t = torch.linspace(-2, 2, size, dtype=torch.float32)
-        h = torch.exp(-t ** 2)
-        return h / h.sum(), radius
+    def _kernel(sigma, dim_size, axis):
+        """A normalized 1D Gaussian kernel of standard deviation `sigma`,
+        sampled on the voxel grid and truncated at `_TRUNCATE * sigma` —
+        i.e. the same discrete kernel `scipy.ndimage.gaussian_filter`
+        builds, so both backends apply the same filter.
 
-    kz, rz = _kernel(sigma_z, dim_z)
-    ky, ry = _kernel(sigma_y, dim_y)
-    kx, rx = _kernel(sigma_x, dim_x)
+        The radius is clamped to `dim_size - 1` because `F.pad(...,
+        mode="reflect")` cannot pad by more than the dimension it pads.
+        Clamping shrinks the *effective* sigma along that axis, so it
+        warns rather than degrading the filter silently.
+        """
+        if sigma <= 0:
+            return torch.ones(1, dtype=torch.float32), 0
+        requested = max(int(np.ceil(sigma * _TRUNCATE)), 1)
+        radius = min(requested, max(dim_size - 1, 0))
+        t = torch.arange(-radius, radius + 1, dtype=torch.float32)
+        h = torch.exp(-(t ** 2) / (2.0 * sigma ** 2))
+        h = h / h.sum()
+        if radius < requested:
+            effective = float(torch.sqrt((h * t ** 2).sum()))
+            warnings.warn(
+                f"sigma={sigma:g} needs a kernel radius of {requested} along "
+                f"{axis}, but that axis is only {dim_size} voxels deep; the "
+                f"radius was clamped to {radius}, so the effective sigma "
+                f"along {axis} is about {effective:.2f}, not {sigma:g}.",
+                RuntimeWarning,
+                stacklevel=4,  # report against the caller of the public fn
+            )
+        return h, radius
+
+    kz, rz = _kernel(sigma_z, dim_z, "Z")
+    ky, ry = _kernel(sigma_y, dim_y, "Y")
+    kx, rx = _kernel(sigma_x, dim_x, "X")
 
     wz = kz.reshape(1, 1, -1, 1, 1)
     wy = ky.reshape(1, 1, 1, -1, 1)
