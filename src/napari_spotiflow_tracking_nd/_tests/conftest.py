@@ -1,36 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
-import sys
-import platform
 
 import numpy as np
 import tifffile
-import pytest
-
-
-def pytest_configure(config):
-    """Mock torch and spotiflow on Windows before any tests run to prevent
-    DLL load failures during @patch decorators.
-    """
-    if platform.system() != "Windows":
-        return
-
-    # Mock torch before spotiflow tries to import it
-    if "torch" not in sys.modules:
-        mock_torch = MagicMock()
-        sys.modules["torch"] = mock_torch
-        sys.modules["torch.nn"] = MagicMock()
-        sys.modules["torch.optim"] = MagicMock()
-        sys.modules["torch.cuda"] = MagicMock()
-
-    # Mock spotiflow modules if not already imported
-    if "spotiflow" not in sys.modules:
-        sys.modules["spotiflow"] = MagicMock()
-        sys.modules["spotiflow.model"] = MagicMock()
-        sys.modules["spotiflow.model.backbones"] = MagicMock()
-        sys.modules["spotiflow.model.backbones.resnet"] = MagicMock()
 
 
 def write_timepoint_folder(
