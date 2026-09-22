@@ -6,10 +6,10 @@ one from `PreProcessingWidget3D`, so the `source_files` contract between the
 two widgets is never actually exercised — rename that key in one file and the
 rest of the suite still passes.
 
-This walks the real workflow with only the Spotiflow model mocked: load a
-folder -> run a pre-processing op -> hand the *resulting* layer to the
-detection widget -> run detection -> check the CSV, the sidecar and the
-Points layer.
+This walks the real workflow with only the Spotiflow model mocked: open a
+folder through the real reader -> apply calibration -> run a pre-processing
+op -> hand the *resulting* layer to the detection widget -> run detection ->
+check the CSV, the sidecar and the Points layer.
 """
 
 from __future__ import annotations
@@ -39,20 +39,26 @@ def test_preprocessing_output_layer_is_consumable_by_the_detection_widget(
 
     viewer = make_napari_viewer()
 
-    # ── Task 5: load the folder through the real widget ──────────────────
+    # ── Reader: open the folder exactly as File > Open / drag-and-drop
+    # would, with no widget involved ───────────────────────────────────
+    from napari_spotiflow_tracking_nd._reader3d import get_reader
+
+    reader = get_reader(str(in_dir))
+    assert reader is not None
+    data, attrs, layer_type = reader(str(in_dir))[0]
+    raw_layer = viewer.add_image(data, **attrs)
+
+    assert len(viewer.layers) == 1
+    assert raw_layer.metadata["source_files"] == source_files
+
+    # ── Task 5: apply calibration, then run a real pre-processing op ─────
     preproc = PreProcessingWidget3D(viewer)
-    preproc._input_folder_edit.setText(str(in_dir))
+    preproc._image_combo.setCurrentText(raw_layer.name)
     preproc._pixel_size_xy_spin.setValue(0.104)
     preproc._voxel_size_z_spin.setValue(0.210)
     preproc._frame_interval_spin.setValue(2.5)
-    preproc._load_folder()
+    preproc._apply_calibration()
 
-    assert len(viewer.layers) == 1
-    raw_layer = viewer.layers[0]
-    assert raw_layer.metadata["source_files"] == source_files
-
-    # ── Task 5: run a real pre-processing op over it ─────────────────────
-    preproc._image_combo.setCurrentText(raw_layer.name)
     preproc._output_folder_edit.setText(str(out_dir))
     preproc._blur_sigma_spin.setValue(1.5)
     preproc._run_gaussian_blur()

@@ -20,11 +20,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from napari_spotiflow_tracking_nd._io3d import (
-    build_lazy_stack_from_files,
-    compute_layer_scale,
-    load_folder_as_lazy_stack,
-)
+from napari_spotiflow_tracking_nd._io3d import build_lazy_stack_from_files, compute_layer_scale
 from napari_spotiflow_tracking_nd._preprocessing3d import (
     _get_device,
     apply_calculation,
@@ -46,43 +42,10 @@ class PreProcessingWidget3D(QWidget):
         layout = QVBoxLayout()
         self.setLayout(layout)
 
-        # ── Load folder ──────────────────────────────────────────────
-        load_group = QGroupBox("Load timeseries folder")
-        load_layout = QVBoxLayout()
-        load_group.setLayout(load_layout)
-
-        folder_row = QHBoxLayout()
-        self._input_folder_edit = QLineEdit()
-        browse_btn = QPushButton("Browse…")
-        browse_btn.clicked.connect(self._browse_input_folder)
-        folder_row.addWidget(self._input_folder_edit)
-        folder_row.addWidget(browse_btn)
-        load_layout.addLayout(folder_row)
-
-        calib_row = QHBoxLayout()
-        calib_row.addWidget(QLabel("xy (µm):"))
-        self._pixel_size_xy_spin = QDoubleSpinBox()
-        self._pixel_size_xy_spin.setRange(0.0, 100.0)
-        self._pixel_size_xy_spin.setDecimals(4)
-        calib_row.addWidget(self._pixel_size_xy_spin)
-        calib_row.addWidget(QLabel("z (µm):"))
-        self._voxel_size_z_spin = QDoubleSpinBox()
-        self._voxel_size_z_spin.setRange(0.0, 100.0)
-        self._voxel_size_z_spin.setDecimals(4)
-        calib_row.addWidget(self._voxel_size_z_spin)
-        calib_row.addWidget(QLabel("dt (s):"))
-        self._frame_interval_spin = QDoubleSpinBox()
-        self._frame_interval_spin.setRange(0.0, 10000.0)
-        self._frame_interval_spin.setDecimals(3)
-        calib_row.addWidget(self._frame_interval_spin)
-        load_layout.addLayout(calib_row)
-
-        self._load_btn = QPushButton("Load Folder")
-        self._load_btn.clicked.connect(self._load_folder)
-        load_layout.addWidget(self._load_btn)
-        layout.addWidget(load_group)
-
         # ── Input / output selection ─────────────────────────────────
+        # Loading a folder is the napari reader's job (File > Open,
+        # drag-and-drop, or the CLI) — this widget only operates on
+        # whatever image layer is already open.
         io_group = QGroupBox("Input / Output")
         io_layout = QVBoxLayout()
         io_group.setLayout(io_layout)
@@ -100,6 +63,36 @@ class PreProcessingWidget3D(QWidget):
         io_layout.addWidget(QLabel("Output folder:"))
         io_layout.addLayout(out_row)
         layout.addWidget(io_group)
+
+        # ── Calibration ───────────────────────────────────────────────
+        # The reader can't prompt for these, so they're entered here and
+        # applied to whichever layer is selected above.
+        calib_group = QGroupBox("Calibration")
+        calib_layout = QVBoxLayout()
+        calib_group.setLayout(calib_layout)
+
+        calib_row = QHBoxLayout()
+        calib_row.addWidget(QLabel("xy (µm):"))
+        self._pixel_size_xy_spin = QDoubleSpinBox()
+        self._pixel_size_xy_spin.setRange(0.0, 100.0)
+        self._pixel_size_xy_spin.setDecimals(4)
+        calib_row.addWidget(self._pixel_size_xy_spin)
+        calib_row.addWidget(QLabel("z (µm):"))
+        self._voxel_size_z_spin = QDoubleSpinBox()
+        self._voxel_size_z_spin.setRange(0.0, 100.0)
+        self._voxel_size_z_spin.setDecimals(4)
+        calib_row.addWidget(self._voxel_size_z_spin)
+        calib_row.addWidget(QLabel("dt (s):"))
+        self._frame_interval_spin = QDoubleSpinBox()
+        self._frame_interval_spin.setRange(0.0, 10000.0)
+        self._frame_interval_spin.setDecimals(3)
+        calib_row.addWidget(self._frame_interval_spin)
+        calib_layout.addLayout(calib_row)
+
+        self._apply_calibration_btn = QPushButton("Apply Calibration")
+        self._apply_calibration_btn.clicked.connect(self._apply_calibration)
+        calib_layout.addWidget(self._apply_calibration_btn)
+        layout.addWidget(calib_group)
 
         # ── Background removal ───────────────────────────────────────
         bg_group = QGroupBox("Background Removal (3D high-pass)")
@@ -175,51 +168,34 @@ class PreProcessingWidget3D(QWidget):
 
     # ── Folder browsing ──────────────────────────────────────────────
 
-    def _browse_input_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select input folder")
-        if folder:
-            self._input_folder_edit.setText(folder)
-
     def _browse_output_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select output folder")
         if folder:
             self._output_folder_edit.setText(folder)
 
-    # ── Load ──────────────────────────────────────────────────────────
+    # ── Calibration ───────────────────────────────────────────────────
 
-    def _load_folder(self):
-        folder = self._input_folder_edit.text()
-        if not folder:
-            show_error("No input folder selected.")
-            return
-        try:
-            stack, files = load_folder_as_lazy_stack(folder)
-        except (OSError, ValueError) as exc:
-            # `OSError` covers `FileNotFoundError` and the permission /
-            # unreadable-file errors; `ValueError` covers a ragged series,
-            # a 2D file, a missing `_T_<n>_` token, and `tifffile`'s own
-            # `TiffFileError` (a `ValueError` subclass) on a corrupt header.
-            show_error(str(exc))
-            return
+    def _apply_calibration(self):
+        """Set scale + calibration metadata on the selected input layer.
 
+        Loading is the reader's job now (File > Open, drag-and-drop, the
+        CLI); this is how calibration reaches a layer that opened that way,
+        since a reader has no UI to prompt through. Works on any image
+        layer with the expected metadata keys, not just one the reader
+        produced.
+        """
+        layer = self._get_input_layer()
+        if layer is None:
+            return
         pixel_size_xy_um = self._pixel_size_xy_spin.value() or None
         voxel_size_z_um = self._voxel_size_z_spin.value() or None
         frame_interval_s = self._frame_interval_spin.value() or None
-        scale = compute_layer_scale(pixel_size_xy_um, voxel_size_z_um)
 
-        layer = self.viewer.add_image(
-            stack,
-            name=Path(folder).name,
-            scale=scale,
-            metadata={
-                "source_files": files,
-                "pixel_size_xy_um": pixel_size_xy_um,
-                "voxel_size_z_um": voxel_size_z_um,
-                "frame_interval_s": frame_interval_s,
-            },
-        )
-        show_info(f"Loaded {len(files)} timepoints from {folder}")
-        return layer
+        layer.scale = compute_layer_scale(pixel_size_xy_um, voxel_size_z_um)
+        layer.metadata["pixel_size_xy_um"] = pixel_size_xy_um
+        layer.metadata["voxel_size_z_um"] = voxel_size_z_um
+        layer.metadata["frame_interval_s"] = frame_interval_s
+        show_info(f"Calibration applied to {layer.name!r}.")
 
     # ── Shared run machinery ─────────────────────────────────────────
 
@@ -271,7 +247,10 @@ class PreProcessingWidget3D(QWidget):
             return
         files = layer.metadata.get("source_files")
         if not files:
-            show_error("Selected layer has no source files (load it via 'Load Folder').")
+            show_error(
+                "Selected layer has no source files (open the folder via "
+                "File > Open, drag-and-drop, or the napari CLI)."
+            )
             return
         output_dir = self._get_output_dir(layer)
         if output_dir is None:

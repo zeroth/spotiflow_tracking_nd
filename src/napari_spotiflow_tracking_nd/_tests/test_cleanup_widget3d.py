@@ -7,7 +7,10 @@ import numpy as np
 import pytest
 import tifffile
 
-from napari_spotiflow_tracking_nd._tests.conftest import write_timepoint_folder
+from napari_spotiflow_tracking_nd._tests.conftest import (
+    add_layer_from_folder,
+    write_timepoint_folder,
+)
 
 
 @pytest.fixture
@@ -19,6 +22,13 @@ def preproc_widget(make_napari_viewer):
     return widget, viewer
 
 
+def _add_and_select(widget, viewer, folder):
+    """Add `folder` as a layer (as the reader would) and select it in the
+    widget's input combo."""
+    add_layer_from_folder(viewer, folder)
+    widget._image_combo.setCurrentIndex(widget._image_combo.count() - 1)
+
+
 class TestPreProcessingWidget3DCreation:
     def test_creates_without_error(self, preproc_widget):
         widget, _ = preproc_widget
@@ -27,8 +37,8 @@ class TestPreProcessingWidget3DCreation:
     def test_has_the_expected_controls(self, preproc_widget):
         widget, _ = preproc_widget
         for attr in (
-            "_input_folder_edit", "_load_btn",
             "_pixel_size_xy_spin", "_voxel_size_z_spin", "_frame_interval_spin",
+            "_apply_calibration_btn",
             "_image_combo", "_output_folder_edit",
             "_bg_sigma_spin", "_bg_use_gpu_check", "_bg_run_btn",
             "_blur_sigma_spin", "_blur_run_btn",
@@ -52,33 +62,50 @@ class TestPreProcessingWidget3DCreation:
         assert widget._image_combo.currentText() == "already_here"
 
 
-class TestLoadFolder:
-    def test_load_folder_adds_a_scaled_image_layer(self, preproc_widget, tmp_path):
+class TestApplyCalibration:
+    def test_sets_scale_and_metadata_on_the_selected_layer(
+        self, preproc_widget, tmp_path
+    ):
         widget, viewer = preproc_widget
         write_timepoint_folder(tmp_path, n_timepoints=3, shape=(4, 8, 8))
+        _add_and_select(widget, viewer, tmp_path)
 
-        widget._input_folder_edit.setText(str(tmp_path))
         widget._pixel_size_xy_spin.setValue(0.104)
         widget._voxel_size_z_spin.setValue(0.210)
-        widget._load_folder()
+        widget._frame_interval_spin.setValue(2.5)
+        widget._apply_calibration()
 
-        assert len(viewer.layers) == 1
         layer = viewer.layers[0]
-        assert layer.data.shape == (3, 4, 8, 8)
         # napari's layer.scale is a numpy array — compare via tuple(), never
         # bare `==` (a multi-element array in a bare assert raises
         # "truth value ambiguous", not a clean test failure).
         assert tuple(layer.scale) == (1.0, 0.210, 0.104, 0.104)
-        assert len(layer.metadata["source_files"]) == 3
+        assert layer.metadata["pixel_size_xy_um"] == 0.104
+        assert layer.metadata["voxel_size_z_um"] == 0.210
+        assert layer.metadata["frame_interval_s"] == 2.5
 
-    def test_load_folder_without_calibration_uses_unit_scale(self, preproc_widget, tmp_path):
+    def test_without_calibration_values_leaves_unit_scale(self, preproc_widget, tmp_path):
         widget, viewer = preproc_widget
         write_timepoint_folder(tmp_path, n_timepoints=2, shape=(4, 8, 8))
+        _add_and_select(widget, viewer, tmp_path)
 
-        widget._input_folder_edit.setText(str(tmp_path))
-        widget._load_folder()
+        widget._apply_calibration()
 
-        assert tuple(viewer.layers[0].scale) == (1.0, 1.0, 1.0, 1.0)
+        layer = viewer.layers[0]
+        assert tuple(layer.scale) == (1.0, 1.0, 1.0, 1.0)
+        assert layer.metadata["pixel_size_xy_um"] is None
+        assert layer.metadata["voxel_size_z_um"] is None
+        assert layer.metadata["frame_interval_s"] is None
+
+    def test_no_input_layer_selected_shows_an_error_instead_of_raising(self, preproc_widget):
+        widget, viewer = preproc_widget
+
+        with patch(
+            "napari_spotiflow_tracking_nd._cleanup_widget3d.show_error"
+        ) as mock_show_error:
+            widget._apply_calibration()  # must not raise
+
+        assert mock_show_error.called
 
 
 class TestRunRemoveBackground:
@@ -86,9 +113,7 @@ class TestRunRemoveBackground:
         widget, viewer = preproc_widget
         write_timepoint_folder(tmp_path / "in", n_timepoints=2, shape=(4, 16, 16))
 
-        widget._input_folder_edit.setText(str(tmp_path / "in"))
-        widget._load_folder()
-        widget._image_combo.setCurrentIndex(0)
+        _add_and_select(widget, viewer, tmp_path / "in")
         widget._output_folder_edit.setText(str(tmp_path / "out_bg"))
         widget._bg_sigma_spin.setValue(2.0)
 
@@ -104,9 +129,7 @@ class TestRunGaussianBlur:
         widget, viewer = preproc_widget
         write_timepoint_folder(tmp_path / "in", n_timepoints=2, shape=(4, 16, 16))
 
-        widget._input_folder_edit.setText(str(tmp_path / "in"))
-        widget._load_folder()
-        widget._image_combo.setCurrentIndex(0)
+        _add_and_select(widget, viewer, tmp_path / "in")
         widget._output_folder_edit.setText(str(tmp_path / "out_blur"))
         widget._blur_sigma_spin.setValue(1.5)
 
@@ -120,9 +143,7 @@ class TestRunArithmetic:
         widget, viewer = preproc_widget
         write_timepoint_folder(tmp_path / "in", n_timepoints=2, shape=(4, 16, 16))
 
-        widget._input_folder_edit.setText(str(tmp_path / "in"))
-        widget._load_folder()
-        widget._image_combo.setCurrentIndex(0)
+        _add_and_select(widget, viewer, tmp_path / "in")
         widget._output_folder_edit.setText(str(tmp_path / "out_calc"))
         widget._calc_op_combo.setCurrentText("add")
         widget._calc_value_spin.setValue(10)
@@ -137,12 +158,6 @@ class TestOutputFolderGuard:
     folder that *is* the input folder overwrites the source acquisition in
     place, file by file, with no confirmation and no undo."""
 
-    @staticmethod
-    def _load_and_select(widget, in_dir):
-        widget._input_folder_edit.setText(str(in_dir))
-        widget._load_folder()
-        widget._image_combo.setCurrentIndex(0)
-
     @pytest.mark.parametrize(
         "run_method", ["_run_remove_background", "_run_gaussian_blur", "_run_arithmetic"]
     )
@@ -154,7 +169,7 @@ class TestOutputFolderGuard:
         write_timepoint_folder(in_dir, n_timepoints=2, shape=(4, 16, 16))
         before = {p.name: p.read_bytes() for p in sorted(in_dir.iterdir())}
 
-        self._load_and_select(widget, in_dir)
+        _add_and_select(widget, viewer, in_dir)
         widget._output_folder_edit.setText(str(in_dir))
         widget._bg_sigma_spin.setValue(2.0)
         widget._calc_value_spin.setValue(10)
@@ -181,7 +196,7 @@ class TestOutputFolderGuard:
         write_timepoint_folder(in_dir, n_timepoints=2, shape=(4, 16, 16))
         before = {p.name: p.read_bytes() for p in sorted(in_dir.iterdir())}
 
-        self._load_and_select(widget, in_dir)
+        _add_and_select(widget, viewer, in_dir)
         # The same folder, spelled with a trailing "/." — resolve() must
         # see through it.
         widget._output_folder_edit.setText(str(in_dir) + os.sep + ".")
@@ -200,7 +215,7 @@ class TestOutputFolderGuard:
         in_dir = tmp_path / "in"
         write_timepoint_folder(in_dir, n_timepoints=2, shape=(4, 16, 16))
 
-        self._load_and_select(widget, in_dir)
+        _add_and_select(widget, viewer, in_dir)
         widget._output_folder_edit.setText(str(tmp_path / "out"))
         widget._calc_value_spin.setValue(10)
 
@@ -227,9 +242,7 @@ class TestOutputReloadUsesOnlyWhatWasWritten:
             np.zeros((8, 32, 32), dtype=np.uint16),
         )
 
-        widget._input_folder_edit.setText(str(in_dir))
-        widget._load_folder()
-        widget._image_combo.setCurrentIndex(0)
+        _add_and_select(widget, viewer, in_dir)
         widget._output_folder_edit.setText(str(out_dir))
         widget._calc_value_spin.setValue(10)
 
@@ -244,38 +257,18 @@ class TestOutputReloadUsesOnlyWhatWasWritten:
         )
 
 
-class TestLoadFolderErrorHandling:
-    def test_a_2d_tiff_folder_shows_an_error_instead_of_raising(
-        self, preproc_widget, tmp_path
+class TestRunWithoutSourceFiles:
+    def test_a_layer_with_no_source_files_shows_an_error_instead_of_raising(
+        self, preproc_widget
     ):
         widget, viewer = preproc_widget
-        tifffile.imwrite(
-            str(tmp_path / "plane_T_000_C_00.tif"), np.zeros((16, 16), dtype=np.uint16)
-        )
-        widget._input_folder_edit.setText(str(tmp_path))
+        viewer.add_image(np.zeros((2, 4, 8, 8), dtype=np.uint16), name="plain")
+        widget._image_combo.setCurrentText("plain")
 
         with patch(
             "napari_spotiflow_tracking_nd._cleanup_widget3d.show_error"
         ) as mock_show_error:
-            widget._load_folder()  # must not raise
+            widget._run_arithmetic()  # must not raise
 
         assert mock_show_error.called
-        assert len(viewer.layers) == 0
-
-    def test_a_corrupt_tiff_shows_an_error_instead_of_raising(
-        self, preproc_widget, tmp_path
-    ):
-        # A garbage header makes tifffile raise `TiffFileError`; the
-        # broadened `except (OSError, ValueError)` must route it to
-        # `show_error` rather than letting it escape a Qt slot.
-        widget, viewer = preproc_widget
-        (tmp_path / "broken_T_000_C_00.tif").write_bytes(b"not a tiff at all")
-        widget._input_folder_edit.setText(str(tmp_path))
-
-        with patch(
-            "napari_spotiflow_tracking_nd._cleanup_widget3d.show_error"
-        ) as mock_show_error:
-            widget._load_folder()  # must not raise
-
-        assert mock_show_error.called
-        assert len(viewer.layers) == 0
+        assert len(viewer.layers) == 1

@@ -145,7 +145,10 @@ class DetectionWidget3D(QWidget):
         layer = self.viewer.layers[name]
         files = layer.metadata.get("source_files")
         if not files:
-            show_error("Selected layer has no source files (load it via Pre-Processing's 'Load Folder').")
+            show_error(
+                "Selected layer has no source files (open the folder via "
+                "File > Open, drag-and-drop, or the napari CLI)."
+            )
             return
         csv_path = self._csv_path_edit.text()
         if not csv_path:

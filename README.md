@@ -12,7 +12,12 @@ whole-movie-in-RAM) version this plugin is ported from.
 
 - **Data loading** — a folder of per-timepoint TIFFs opens as a single
   lazy `(T, Z, Y, X)` image layer (`dask`-backed; nothing is loaded until
-  you scrub to it).
+  you scrub to it) via a napari **reader**: `File > Open Folder…`,
+  drag-and-drop, `napari path/to/folder`, or opening a single file inside
+  the series all work with no widget interaction. Because a reader can't
+  prompt for input, the layer opens at unit scale; use the Pre-Processing
+  widget's **Apply Calibration** action afterward to set pixel size, voxel
+  size and frame interval on it.
 - **Pre-processing** — background removal (3D high-pass), Gaussian blur,
   and add/subtract arithmetic, each streamed volume-by-volume and written
   to an output folder of per-timepoint TIFFs (same filenames as the
@@ -47,11 +52,13 @@ napari   # then open Plugins → Spotiflow ND Tracking → <widget>
 
 ## Calibration
 
-Pixel size (xy, µm) and voxel size (z, µm) are entered when loading a
-folder in the Pre-Processing widget; they set the loaded layer's `scale`
-so 3D rendering has the correct aspect ratio. Frame interval (s) is
-carried in layer metadata for later phases. None of these are hard-coded
-— enter the values for your own acquisition.
+Pixel size (xy, µm) and voxel size (z, µm) are entered in the
+Pre-Processing widget's **Apply Calibration** action, which sets the
+selected layer's `scale` (for correct 3D aspect ratio) and its metadata —
+works on a layer opened through the reader, or built any other way, as
+long as it carries the same metadata keys. Frame interval (s) is carried
+in layer metadata for later phases. None of these are hard-coded — enter
+the values for your own acquisition.
 
 ## Tests
 

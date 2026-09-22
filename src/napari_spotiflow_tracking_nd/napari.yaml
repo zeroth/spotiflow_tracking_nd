@@ -2,12 +2,22 @@ name: napari-spotiflow-tracking-nd
 display_name: Spotiflow ND Tracking
 contributions:
   commands:
+    - id: napari-spotiflow-tracking-nd.read_volume_timeseries
+      python_name: napari_spotiflow_tracking_nd._reader3d:get_reader
+      title: Open a 3D volume timeseries folder
     - id: napari-spotiflow-tracking-nd.preprocessing_widget
       python_name: napari_spotiflow_tracking_nd._cleanup_widget3d:PreProcessingWidget3D
       title: Pre-Processing
     - id: napari-spotiflow-tracking-nd.detection_widget
       python_name: napari_spotiflow_tracking_nd._detection_widget3d:DetectionWidget3D
       title: Spot Detection
+  readers:
+    # Accepts a folder of per-timepoint 3D TIFFs, or a single file inside
+    # one (loads the whole series); declines anything else so napari's
+    # builtin TIFF reader still handles a standalone volume.
+    - command: napari-spotiflow-tracking-nd.read_volume_timeseries
+      filename_patterns: ['*.tif']
+      accepts_directories: true
   widgets:
     - command: napari-spotiflow-tracking-nd.preprocessing_widget
       display_name: Pre-Processing
