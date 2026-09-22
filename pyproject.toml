@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "napari-spotiflow-tracking-nd"
+version = "0.1.0"
+description = "Napari plugin for 3D-volume-timeseries spot detection and tracking using Spotiflow and trackpy"
+requires-python = ">=3.9"
+license = { text = "BSD-3-Clause" }
+dependencies = [
+    "numpy",
+    "spotiflow>=0.6.0",
+    "qtpy",
+    "superqt",
+    "pandas",
+    "dask",
+    "scipy",
+    "tifffile",
+]
+
+[project.optional-dependencies]
+testing = [
+    "pytest",
+    "pytest-cov",
+    "pytest-qt",
+    "napari",
+    "pyqt5",
+]
+dev = [
+    "pre-commit",
+    "ruff",
+]
+
+[project.entry-points."napari.manifest"]
+napari-spotiflow-tracking-nd = "napari_spotiflow_tracking_nd:napari.yaml"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+napari_spotiflow_tracking_nd = ["napari.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["src/napari_spotiflow_tracking_nd/_tests"]
