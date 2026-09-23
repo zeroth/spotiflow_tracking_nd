@@ -91,6 +91,7 @@ def test_preprocessing_output_layer_is_consumable_by_the_detection_widget(
     mock_load_model.return_value = mock_model
 
     detection = DetectionWidget3D(viewer)
+    detection._launch_worker = lambda worker: worker.run()  # see above
     # The combo must already list the pre-processing output, without any
     # further layer event.
     assert processed.name in [
