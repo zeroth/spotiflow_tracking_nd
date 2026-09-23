@@ -46,8 +46,27 @@ background removal, Shapes-based crop.
 
 ```bash
 pip install -e ".[testing]"   # brings napari + PyQt6
+
+# GPU build of torch — do this explicitly; the default PyPI wheel is
+# CPU-only, which makes the widgets' "Use GPU" checkboxes useless.
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+
 napari                        # Plugins → Spotiflow ND Tracking → <widget>
 ```
+
+Check the GPU is actually live before a long run:
+
+```bash
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+# want: 2.x.y+cu126 True   —   a bare '2.x.y' or '+cpu' means CPU-only
+```
+
+> If a CPU build is already installed, `pip install torch --index-url …`
+> **silently does nothing** — pip treats the existing version as
+> satisfying the unpinned requirement and never notices `+cpu` vs
+> `+cu126`. Uninstall first (`pip uninstall torch torchvision -y`), and
+> close any napari/python process using the venv, or the reinstall fails
+> with `Access is denied` on `torch\_C.pyd` and leaves a broken install.
 
 > **Use PyQt6, not PyQt5.** On Windows, PyQt5's bundled Qt DLLs collide
 > with torch's: because napari loads Qt before any plugin code runs, the
@@ -61,8 +80,10 @@ napari                        # Plugins → Spotiflow ND Tracking → <widget>
 >
 > `torchvision` must also be installed — Spotiflow imports it at module
 > load, so without it `spotiflow.model` fails with
-> `ModuleNotFoundError: No module named 'torchvision'`. Keep its version
-> paired with torch's (e.g. torch 2.9.1 ↔ torchvision 0.24.1).
+> `ModuleNotFoundError: No module named 'torchvision'`. Install it from
+> the same index as torch so the pair matches (e.g. torch 2.14.0+cu126 ↔
+> torchvision 0.29.0+cu126); a mismatched pair fails with
+> `ImportError: DLL load failed while importing _C`.
 
 ## Calibration
 
