@@ -85,6 +85,11 @@ class DetectionWidget3D(QWidget):
         self._browse_model_btn.clicked.connect(self._browse_custom_model)
         model_layout.addWidget(self._browse_model_btn)
         self._use_gpu_check = QCheckBox("Use GPU")
+        # On by default: `_get_device` quietly falls back to "cpu"
+        # when CUDA is unavailable, so this costs nothing on a
+        # CPU-only machine and saves ticking it every session on a
+        # GPU one.
+        self._use_gpu_check.setChecked(True)
         model_layout.addWidget(self._use_gpu_check)
         layout.addWidget(model_group)
 

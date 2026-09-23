@@ -34,6 +34,12 @@ class TestPreProcessingWidget3DCreation:
         widget, _ = preproc_widget
         assert widget is not None
 
+    def test_use_gpu_is_on_by_default(self, preproc_widget):
+        # See the detection widget: `_get_device` degrades to "cpu"
+        # gracefully, so on-by-default costs nothing without CUDA.
+        widget, _ = preproc_widget
+        assert widget._bg_use_gpu_check.isChecked()
+
     def test_has_the_expected_controls(self, preproc_widget):
         widget, _ = preproc_widget
         for attr in (

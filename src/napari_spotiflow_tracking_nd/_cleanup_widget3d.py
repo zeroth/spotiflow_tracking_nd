@@ -108,6 +108,9 @@ class PreProcessingWidget3D(QWidget):
         self._bg_sigma_spin.setValue(10.0)
         bg_layout.addWidget(self._bg_sigma_spin)
         self._bg_use_gpu_check = QCheckBox("Use GPU")
+        # On by default: `_get_device` quietly falls back to "cpu"
+        # when CUDA is unavailable (see the detection widget).
+        self._bg_use_gpu_check.setChecked(True)
         bg_layout.addWidget(self._bg_use_gpu_check)
         self._bg_preview_btn = QPushButton("Preview")
         self._bg_run_btn = QPushButton("Run")

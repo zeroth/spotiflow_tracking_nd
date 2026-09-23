@@ -25,6 +25,13 @@ class TestDetectionWidget3DCreation:
         widget, _ = detection_widget
         assert widget is not None
 
+    def test_use_gpu_is_on_by_default(self, detection_widget):
+        # `_get_device` falls back to "cpu" when CUDA isn't available, so
+        # defaulting this on is safe on a CPU-only machine and saves
+        # ticking it every session on a GPU one.
+        widget, _ = detection_widget
+        assert widget._use_gpu_check.isChecked()
+
     def test_has_the_expected_controls(self, detection_widget):
         widget, _ = detection_widget
         for attr in (
