@@ -7,7 +7,13 @@ import numpy as np
 # registered 3D model added upstream can still be loaded — pass its name
 # here too, or use a local checkpoint path, which always goes through
 # `Spotiflow.from_folder`.
-_PRETRAINED_3D_MODELS = {"synth_3d", "smfish_3d"}
+#
+# Hard-coded rather than queried from spotiflow at import time on purpose:
+# reading the live registry means importing spotiflow (and so torch), which
+# the Spot Detection widget must not do just to populate a combo box.
+PRETRAINED_3D_MODELS: tuple[str, ...] = ("synth_3d", "smfish_3d")
+
+_PRETRAINED_3D_MODELS = set(PRETRAINED_3D_MODELS)
 
 
 def load_model(model_name: str, device: str = "cpu"):

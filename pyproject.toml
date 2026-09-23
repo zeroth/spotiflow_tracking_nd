@@ -25,7 +25,10 @@ testing = [
     "pytest-cov",
     "pytest-qt",
     "napari",
-    "pyqt5",
+    # PyQt6, not PyQt5: on Windows, PyQt5's bundled Qt DLLs collide with
+    # torch's when Qt is loaded first (which napari always does), and torch
+    # then fails with "WinError 1114 ... c10.dll". PyQt6 does not.
+    "pyqt6",
 ]
 dev = [
     "pre-commit",

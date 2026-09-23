@@ -23,9 +23,10 @@ whole-movie-in-RAM) version this plugin is ported from.
   to an output folder of per-timepoint TIFFs (same filenames as the
   input — no zarr).
 - **Spot detection** — [Spotiflow](https://github.com/weigertlab/spotiflow)
-  3D models (`synth_3d`, `smfish_3d`, or a custom checkpoint), run per
-  volume, exported to a CSV (`frame, z, y, x, prob`) and loaded back as a
-  Points layer. The calibration in force for the run is written beside the
+  3D models, picked from a drop-down of the built-ins (`synth_3d`,
+  `smfish_3d`) or set to a custom checkpoint folder (the drop-down is
+  editable; **Browse…** fills it in). Runs per volume, exported to a CSV
+  (`frame, z, y, x, prob`) and loaded back as a Points layer. The calibration in force for the run is written beside the
   CSV as a JSON sidecar (`spots.csv` → `spots.json`) and carried on the
   Points layer's metadata.
 
@@ -44,11 +45,24 @@ background removal, Shapes-based crop.
 ## Install
 
 ```bash
-pip install -e ".[testing]"
-pip install "napari[all]"   # if napari + a Qt backend aren't already present
-
-napari   # then open Plugins → Spotiflow ND Tracking → <widget>
+pip install -e ".[testing]"   # brings napari + PyQt6
+napari                        # Plugins → Spotiflow ND Tracking → <widget>
 ```
+
+> **Use PyQt6, not PyQt5.** On Windows, PyQt5's bundled Qt DLLs collide
+> with torch's: because napari loads Qt before any plugin code runs, the
+> first `import torch` (i.e. the first model load) then dies with
+> `OSError: [WinError 1114] ... Error loading "torch\lib\c10.dll"`. PyQt6
+> has no such conflict. If you hit that error, check with
+> `python -c "import qtpy; print(qtpy.API_NAME)"` — if it says PyQt5,
+> `pip uninstall PyQt5 PyQt5-Qt5 PyQt5_sip` and `pip install PyQt6`
+> (qtpy prefers PyQt5 whenever it is installed, so removing it is more
+> reliable than setting `QT_API`).
+>
+> `torchvision` must also be installed — Spotiflow imports it at module
+> load, so without it `spotiflow.model` fails with
+> `ModuleNotFoundError: No module named 'torchvision'`. Keep its version
+> paired with torch's (e.g. torch 2.9.1 ↔ torchvision 0.24.1).
 
 ## Calibration
 

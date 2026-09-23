@@ -23,7 +23,7 @@ from qtpy.QtWidgets import (
 )
 
 from napari_spotiflow_tracking_nd._preprocessing3d import _get_device
-from napari_spotiflow_tracking_nd._segmentation3d import load_model
+from napari_spotiflow_tracking_nd._segmentation3d import PRETRAINED_3D_MODELS, load_model
 from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
 
 # Calibration keys copied from the source image layer onto the Points
@@ -62,8 +62,15 @@ class DetectionWidget3D(QWidget):
         model_group = QGroupBox("Model")
         model_layout = QHBoxLayout()
         model_group.setLayout(model_layout)
-        self._model_name_edit = QLineEdit("synth_3d")
-        model_layout.addWidget(self._model_name_edit)
+        # Editable: the drop-down offers Spotiflow's built-in 3D models,
+        # but a custom checkpoint folder (typed, pasted, or picked with
+        # Browse…) is still a valid entry — `load_model` treats anything
+        # that isn't a registered name as a path.
+        self._model_combo = QComboBox()
+        self._model_combo.setEditable(True)
+        self._model_combo.addItems(PRETRAINED_3D_MODELS)
+        self._model_combo.setCurrentText(PRETRAINED_3D_MODELS[0])
+        model_layout.addWidget(self._model_combo)
         self._browse_model_btn = QPushButton("Browse…")
         self._browse_model_btn.clicked.connect(self._browse_custom_model)
         model_layout.addWidget(self._browse_model_btn)
@@ -130,7 +137,7 @@ class DetectionWidget3D(QWidget):
     def _browse_custom_model(self):
         folder = QFileDialog.getExistingDirectory(self, "Select model checkpoint folder")
         if folder:
-            self._model_name_edit.setText(folder)
+            self._model_combo.setCurrentText(folder)
 
     def _browse_csv_path(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save spots CSV", "", "CSV files (*.csv)")
@@ -159,12 +166,12 @@ class DetectionWidget3D(QWidget):
         # available, instead of erroring deep inside Spotiflow.
         device = _get_device(use_gpu=self._use_gpu_check.isChecked())
         try:
-            model = load_model(self._model_name_edit.text(), device=device)
+            model = load_model(self._model_combo.currentText(), device=device)
         except Exception as exc:
             # A bad model name, a missing/corrupt checkpoint folder, or a
             # failed weight download must not raise out of a Qt slot.
             show_error(f"Could not load model "
-                       f"{self._model_name_edit.text()!r}: {exc}")
+                       f"{self._model_combo.currentText()!r}: {exc}")
             return
 
         self._progress_bar.setMaximum(len(files))

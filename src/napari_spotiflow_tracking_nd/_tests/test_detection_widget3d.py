@@ -27,11 +27,52 @@ class TestDetectionWidget3DCreation:
     def test_has_the_expected_controls(self, detection_widget):
         widget, _ = detection_widget
         for attr in (
-            "_image_combo", "_model_name_edit", "_browse_model_btn",
+            "_image_combo", "_model_combo", "_browse_model_btn",
             "_prob_thresh_spin", "_min_distance_spin",
             "_csv_path_edit", "_browse_csv_btn", "_run_btn", "_progress_bar",
         ):
             assert hasattr(widget, attr), f"missing {attr}"
+
+
+class TestModelDropdown:
+    def test_lists_every_built_in_3d_model(self, detection_widget):
+        from napari_spotiflow_tracking_nd._segmentation3d import PRETRAINED_3D_MODELS
+
+        widget, _ = detection_widget
+        listed = [
+            widget._model_combo.itemText(i) for i in range(widget._model_combo.count())
+        ]
+
+        assert listed == list(PRETRAINED_3D_MODELS)
+
+    def test_defaults_to_the_first_built_in_model(self, detection_widget):
+        from napari_spotiflow_tracking_nd._segmentation3d import PRETRAINED_3D_MODELS
+
+        widget, _ = detection_widget
+
+        assert widget._model_combo.currentText() == PRETRAINED_3D_MODELS[0]
+
+    def test_a_custom_checkpoint_path_is_still_accepted(self, detection_widget, tmp_path):
+        # The combo is editable so a local checkpoint folder — the thing
+        # `load_model` falls through to `Spotiflow.from_folder` for — can
+        # still be typed, pasted, or filled in by Browse….
+        widget, _ = detection_widget
+
+        widget._model_combo.setCurrentText(str(tmp_path / "my_checkpoint"))
+
+        assert widget._model_combo.currentText() == str(tmp_path / "my_checkpoint")
+
+    def test_browse_puts_the_chosen_folder_into_the_combo(self, detection_widget, tmp_path):
+        widget, _ = detection_widget
+        chosen = str(tmp_path / "checkpoint_dir")
+
+        with patch(
+            "napari_spotiflow_tracking_nd._detection_widget3d.QFileDialog.getExistingDirectory",
+            return_value=chosen,
+        ):
+            widget._browse_custom_model()
+
+        assert widget._model_combo.currentText() == chosen
 
     def test_combo_is_populated_for_layers_that_existed_before_construction(
         self, make_napari_viewer
@@ -72,7 +113,7 @@ class TestRunDetection:
         widget._image_combo.clear()
         widget._image_combo.addItem("vol")
         widget._image_combo.setCurrentText("vol")
-        widget._model_name_edit.setText("synth_3d")
+        widget._model_combo.setCurrentText("synth_3d")
         widget._csv_path_edit.setText(str(tmp_path / "spots.csv"))
 
         widget._run_detection()
@@ -126,7 +167,7 @@ class TestRunDetection:
         widget._image_combo.clear()
         widget._image_combo.addItem("vol")
         widget._image_combo.setCurrentText("vol")
-        widget._model_name_edit.setText("synth_3d")
+        widget._model_combo.setCurrentText("synth_3d")
         csv_path = tmp_path / "spots.csv"
         widget._csv_path_edit.setText(str(csv_path))
 
@@ -150,7 +191,7 @@ class TestRunDetection:
             metadata={"source_files": files},
         )
         widget._image_combo.setCurrentText("vol")
-        widget._model_name_edit.setText("no_such_model")
+        widget._model_combo.setCurrentText("no_such_model")
         widget._csv_path_edit.setText(str(tmp_path / "spots.csv"))
 
         with patch(
@@ -183,7 +224,7 @@ class TestCalibrationIsThreadedThrough:
             metadata={"source_files": files, **calibration},
         )
         widget._image_combo.setCurrentText("vol")
-        widget._model_name_edit.setText("synth_3d")
+        widget._model_combo.setCurrentText("synth_3d")
         widget._csv_path_edit.setText(str(tmp_path / "spots.csv"))
         widget._run_detection()
 
