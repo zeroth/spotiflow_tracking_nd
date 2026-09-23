@@ -96,6 +96,15 @@ class PreProcessingWidget3D(RunStateMixin, QWidget):
         self._apply_calibration_btn = QPushButton("Apply Calibration")
         self._apply_calibration_btn.clicked.connect(self._apply_calibration)
         calib_layout.addWidget(self._apply_calibration_btn)
+
+        self._link_sigma_check = QCheckBox("Link σ to calibration")
+        self._link_sigma_check.setToolTip(
+            "σ is in voxels, and voxels are rarely cubes. With this on, "
+            "the σ below is the lateral value and the axial one is derived "
+            "from the calibration, so the filter covers the same physical "
+            "distance on every axis."
+        )
+        calib_layout.addWidget(self._link_sigma_check)
         layout.addWidget(calib_group)
 
         # ── Background removal ───────────────────────────────────────
@@ -385,57 +394,116 @@ class PreProcessingWidget3D(RunStateMixin, QWidget):
             worker, total=len(files), description=f"Running {suffix}", on_finished=_on_finished,
         )
 
+    @staticmethod
+    def _sigma_label(sigma) -> str:
+        """`sigma` for a layer name, without float noise."""
+        if isinstance(sigma, tuple):
+            return "(" + ", ".join(f"{v:.3g}" for v in sigma) + ")"
+        return f"{sigma:.3g}"
+
+    def _sigma_for(self, sigma_xy: float, layer):
+        """σ as `(z, y, x)` when linked to calibration, else the scalar.
+
+        A σ of 4 means four *voxels*, and these voxels are not cubes — at
+        0.104 µm laterally against 0.210 µm axially, the same number covers
+        twice the physical distance along z. Linking derives the axial
+        value so the filter is isotropic in µm rather than in array
+        indices.
+
+        Returns None (after `show_error`) when linking is on but the layer
+        carries no calibration: a filter quietly doing something other than
+        what the ticked box promises is worse than a refusal.
+        """
+        if not self._link_sigma_check.isChecked():
+            return sigma_xy
+
+        pixel_size_xy_um = layer.metadata.get("pixel_size_xy_um")
+        voxel_size_z_um = layer.metadata.get("voxel_size_z_um")
+        if not pixel_size_xy_um or not voxel_size_z_um:
+            show_error(
+                "σ is linked to calibration, but this layer has none — set "
+                "the pixel and voxel size above and press Apply Calibration "
+                "first."
+            )
+            return None
+
+        return (sigma_xy * (pixel_size_xy_um / voxel_size_z_um), sigma_xy, sigma_xy)
+
     # ── Op builders ──────────────────────────────────────────────────
     # Each returns (op, kwargs, run_suffix, preview_kind). `run_suffix`
     # carries the parameters, so every run makes a distinctly-named output
     # layer; `preview_kind` deliberately does not, so repeated previews
     # replace one layer instead of stacking one per parameter value.
 
-    def _bg_op(self):
+    def _bg_op(self, layer):
         # `_get_device` falls back to "cpu" when CUDA isn't actually
         # available, instead of erroring deep inside the torch call.
         device = _get_device(use_gpu=self._bg_use_gpu_check.isChecked())
-        sigma = self._bg_sigma_spin.value()
+        sigma = self._sigma_for(self._bg_sigma_spin.value(), layer)
+        if sigma is None:
+            return None
         return (
             remove_background_high_pass_3d,
             {"sigma": sigma, "device": device},
-            f"bg s={sigma}",
+            f"bg s={self._sigma_label(sigma)}",
             "bg",
         )
 
-    def _blur_op(self):
-        sigma = self._blur_sigma_spin.value()
-        return gaussian_blur_3d, {"sigma": sigma}, f"blur s={sigma}", "blur"
+    def _blur_op(self, layer):
+        sigma = self._sigma_for(self._blur_sigma_spin.value(), layer)
+        if sigma is None:
+            return None
+        return (
+            gaussian_blur_3d,
+            {"sigma": sigma},
+            f"blur s={self._sigma_label(sigma)}",
+            "blur",
+        )
 
-    def _calc_op(self):
+    def _calc_op(self, layer):  # `layer` unused: arithmetic has no sigma
         op = self._calc_op_combo.currentText()
         value = self._calc_value_spin.value()
         return apply_calculation, {"op": op, "value": value}, f"{op} {value}", "calc"
 
+    # ── Dispatch ─────────────────────────────────────────────────────
+
+    def _dispatch(self, build, *, preview: bool):
+        """Resolve the input layer, build the op against it, and start.
+
+        The builders need the layer because a σ linked to calibration is
+        derived from that layer's metadata, and because they may refuse
+        (returning None) when the calibration it promises is missing.
+        """
+        layer = self._get_input_layer()
+        if layer is None:
+            return
+        built = build(layer)
+        if built is None:
+            return
+        op, kwargs, suffix, kind = built
+        if preview:
+            self._run_preview(op, kwargs, kind)
+        else:
+            self._run_op(op, kwargs, suffix)
+
     # ── Run (whole series) ───────────────────────────────────────────
 
     def _run_remove_background(self):
-        op, kwargs, suffix, _kind = self._bg_op()
-        self._run_op(op, kwargs, suffix)
+        self._dispatch(self._bg_op, preview=False)
 
     def _run_gaussian_blur(self):
-        op, kwargs, suffix, _kind = self._blur_op()
-        self._run_op(op, kwargs, suffix)
+        self._dispatch(self._blur_op, preview=False)
 
     def _run_arithmetic(self):
-        op, kwargs, suffix, _kind = self._calc_op()
-        self._run_op(op, kwargs, suffix)
+        self._dispatch(self._calc_op, preview=False)
 
     # ── Preview (current timepoint only) ─────────────────────────────
 
     def _preview_remove_background(self):
-        op, kwargs, _suffix, kind = self._bg_op()
-        self._run_preview(op, kwargs, kind)
+        self._dispatch(self._bg_op, preview=True)
 
     def _preview_gaussian_blur(self):
-        op, kwargs, _suffix, kind = self._blur_op()
-        self._run_preview(op, kwargs, kind)
+        self._dispatch(self._blur_op, preview=True)
 
     def _preview_arithmetic(self):
-        op, kwargs, _suffix, kind = self._calc_op()
-        self._run_preview(op, kwargs, kind)
+        self._dispatch(self._calc_op, preview=True)

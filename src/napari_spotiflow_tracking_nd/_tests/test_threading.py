@@ -47,11 +47,9 @@ class TestRealThreading:
         main_thread = threading.get_ident()
         worker_threads = []
 
-        original = widget._calc_op()[0]
-
         def _spy(volume, **kwargs):
             worker_threads.append(threading.get_ident())
-            return original(volume, **kwargs)
+            return apply_calculation(volume, **kwargs)
 
         with qtbot.waitSignal(widget._progress_bar.valueChanged, timeout=10000):
             widget._run_op(_spy, {"op": "add", "value": 5}, "calc")

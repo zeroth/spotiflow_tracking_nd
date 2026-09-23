@@ -52,7 +52,7 @@ class TestPreProcessingWidget3DCreation:
             "_bg_sigma_spin", "_bg_use_gpu_check", "_bg_run_btn",
             "_blur_sigma_spin", "_blur_run_btn",
             "_calc_op_combo", "_calc_value_spin", "_calc_run_btn",
-            "_cancel_btn", "_status_label",
+            "_cancel_btn", "_status_label", "_link_sigma_check",
             "_bg_preview_btn", "_blur_preview_btn", "_calc_preview_btn",
         ):
             assert hasattr(widget, attr), f"missing {attr}"
@@ -429,3 +429,106 @@ class TestThreadedRunWiring:
         # It apologised for a freeze that no longer happens.
         widget, _ = preproc_widget
         assert not hasattr(widget, "_blocking_note")
+
+
+class TestLinkSigmaToCalibration:
+    """σ is in voxels, and these voxels are not cubes: 0.104 µm laterally
+    against 0.210 µm axially. A single σ therefore covers twice the
+    physical distance along z as it does across x/y."""
+
+    @staticmethod
+    def _calibrated(widget, viewer, folder, xy=0.104, z=0.210):
+        write_timepoint_folder(folder, n_timepoints=2, shape=(8, 16, 16))
+        _add_and_select(widget, viewer, folder)
+        widget._pixel_size_xy_spin.setValue(xy)
+        widget._voxel_size_z_spin.setValue(z)
+        widget._apply_calibration()
+        return viewer.layers[0]
+
+    def test_unlinked_sigma_stays_a_plain_scalar(self, preproc_widget, tmp_path):
+        widget, viewer = preproc_widget
+        layer = self._calibrated(widget, viewer, tmp_path)
+        widget._blur_sigma_spin.setValue(4.0)
+
+        assert widget._blur_op(layer)[1]["sigma"] == 4.0
+
+    def test_linked_sigma_derives_the_axial_value_from_calibration(
+        self, preproc_widget, tmp_path
+    ):
+        widget, viewer = preproc_widget
+        layer = self._calibrated(widget, viewer, tmp_path)
+        widget._blur_sigma_spin.setValue(4.0)
+        widget._link_sigma_check.setChecked(True)
+
+        sigma = widget._blur_op(layer)[1]["sigma"]
+
+        # Same physical width on every axis: ~half the voxels along z.
+        assert sigma == pytest.approx((4.0 * 0.104 / 0.210, 4.0, 4.0))
+
+    def test_background_removal_links_as_well(self, preproc_widget, tmp_path):
+        widget, viewer = preproc_widget
+        layer = self._calibrated(widget, viewer, tmp_path)
+        widget._bg_sigma_spin.setValue(10.0)
+        widget._link_sigma_check.setChecked(True)
+
+        sigma = widget._bg_op(layer)[1]["sigma"]
+
+        assert sigma == pytest.approx((10.0 * 0.104 / 0.210, 10.0, 10.0))
+
+    def test_isotropic_voxels_leave_sigma_effectively_unchanged(
+        self, preproc_widget, tmp_path
+    ):
+        # A sanity check on the direction of the ratio: with cubic voxels
+        # linking must be a no-op, not a doubling or a halving.
+        widget, viewer = preproc_widget
+        layer = self._calibrated(widget, viewer, tmp_path, xy=0.1, z=0.1)
+        widget._blur_sigma_spin.setValue(4.0)
+        widget._link_sigma_check.setChecked(True)
+
+        assert widget._blur_op(layer)[1]["sigma"] == pytest.approx((4.0, 4.0, 4.0))
+
+    def test_linking_without_calibration_refuses_the_run(self, preproc_widget, tmp_path):
+        # Silently falling back to isotropic would make the filter do
+        # something other than what the ticked box promises.
+        widget, viewer = preproc_widget
+        in_dir = tmp_path / "in"
+        write_timepoint_folder(in_dir, n_timepoints=2, shape=(8, 16, 16))
+        _add_and_select(widget, viewer, in_dir)  # no calibration applied
+        widget._link_sigma_check.setChecked(True)
+        widget._output_folder_edit.setText(str(tmp_path / "out"))
+
+        with patch(
+            "napari_spotiflow_tracking_nd._cleanup_widget3d.show_error"
+        ) as mock_show_error:
+            widget._run_gaussian_blur()  # must not raise
+
+        assert mock_show_error.called
+        assert "Apply Calibration" in " ".join(
+            str(c) for c in mock_show_error.call_args_list
+        )
+        assert not (tmp_path / "out").exists()
+
+    def test_the_applied_sigma_is_visible_in_the_layer_name(
+        self, preproc_widget, tmp_path
+    ):
+        widget, viewer = preproc_widget
+        in_dir = tmp_path / "in"
+        layer = self._calibrated(widget, viewer, in_dir)
+        widget._blur_sigma_spin.setValue(4.0)
+        widget._link_sigma_check.setChecked(True)
+        widget._output_folder_edit.setText(str(tmp_path / "out"))
+
+        widget._run_gaussian_blur()
+
+        # What was actually applied, readable from the layer list.
+        assert "1.98" in viewer.layers[-1].name
+
+    def test_a_scalar_sigma_is_not_printed_with_float_noise(
+        self, preproc_widget, tmp_path
+    ):
+        widget, viewer = preproc_widget
+        layer = self._calibrated(widget, viewer, tmp_path)
+        widget._blur_sigma_spin.setValue(1.5)
+
+        assert widget._blur_op(layer)[2] == "blur s=1.5"
+

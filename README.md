@@ -104,6 +104,31 @@ long as it carries the same metadata keys. Frame interval (s) is carried
 in layer metadata for later phases. None of these are hard-coded — enter
 the values for your own acquisition.
 
+### Link σ to calibration
+
+σ for background removal and Gaussian blur is measured in **voxels**, and
+voxels are rarely cubes — at 0.104 µm laterally against 0.210 µm axially, a
+σ of 4 spans 0.416 µm across x/y but 0.840 µm along z. The filter is then
+isotropic in array indices and twice as wide in z in physical space, which
+smears spots axially and leaves axial background under-subtracted.
+
+Tick **Link σ to calibration** and the σ you type stays the lateral value
+while the axial one is derived:
+
+```
+σ_z = σ_xy × (pixel_size_xy_um / voxel_size_z_um)
+```
+
+so σ = 4 is applied as `(1.98, 4, 4)` — the same 0.416 µm on every axis.
+The applied value appears in the output layer's name, e.g.
+`vol (blur s=(1.98, 4, 4))`. Linking needs a calibrated layer: with the box
+ticked and no calibration, the run is refused rather than silently falling
+back to isotropic voxels.
+
+Isotropic-in-µm is not automatically the right target — axial optical
+resolution is typically 2–3× worse than lateral, so a filter matched to the
+PSF's own anisotropy is also defensible. Leave the box unticked for that.
+
 ## Tests
 
 ```bash
