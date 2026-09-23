@@ -59,6 +59,16 @@ def probe_volume_shape(path: str | Path) -> tuple[tuple[int, int, int], np.dtype
         return shape, series.dtype
 
 
+def read_volume(path: str | Path) -> np.ndarray:
+    """Read one (Z, Y, X) volume off disk, eagerly.
+
+    The lazy stack is for viewing; this is for the quick-preview path,
+    which deliberately pulls a single timepoint into memory instead of
+    streaming the whole series.
+    """
+    return tifffile.imread(str(path))
+
+
 def build_lazy_stack_from_files(
     files: list[str | Path],
 ) -> tuple[da.Array, list[Path]]:

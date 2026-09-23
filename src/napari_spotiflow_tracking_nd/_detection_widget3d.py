@@ -22,8 +22,13 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from napari_spotiflow_tracking_nd._io3d import read_volume
 from napari_spotiflow_tracking_nd._preprocessing3d import _get_device
-from napari_spotiflow_tracking_nd._segmentation3d import PRETRAINED_3D_MODELS, load_model
+from napari_spotiflow_tracking_nd._segmentation3d import (
+    PRETRAINED_3D_MODELS,
+    detect_spots_3d,
+    load_model,
+)
 from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
 
 # Calibration keys copied from the source image layer onto the Points
@@ -44,6 +49,11 @@ class DetectionWidget3D(QWidget):
         super().__init__()
         self.viewer = napari_viewer
         self._worker: DetectionWorker3D | None = None
+        # Last model loaded, keyed by (name, device). Preview is meant to
+        # be clicked repeatedly while tuning, and re-loading the weights
+        # every click is by far the slowest part of it.
+        self._model_cache = None
+        self._model_cache_key: tuple[str, str] | None = None
         self._setup_ui()
         self._connect_events()
 
@@ -104,9 +114,14 @@ class DetectionWidget3D(QWidget):
         out_layout.addWidget(self._browse_csv_btn)
         layout.addWidget(out_group)
 
+        run_row = QHBoxLayout()
+        self._preview_btn = QPushButton("Preview (current timepoint)")
+        self._preview_btn.clicked.connect(self._run_preview)
+        run_row.addWidget(self._preview_btn)
         self._run_btn = QPushButton("Run Detection")
         self._run_btn.clicked.connect(self._run_detection)
-        layout.addWidget(self._run_btn)
+        run_row.addWidget(self._run_btn)
+        layout.addLayout(run_row)
 
         self._progress_bar = QProgressBar()
         layout.addWidget(self._progress_bar)
@@ -144,6 +159,81 @@ class DetectionWidget3D(QWidget):
         if path:
             self._csv_path_edit.setText(path)
 
+    def _load_model_cached(self, model_name: str, device: str):
+        """`load_model`, reusing the previous result when the (name,
+        device) pair is unchanged."""
+        key = (model_name, device)
+        if self._model_cache_key != key:
+            self._model_cache = load_model(model_name, device=device)
+            self._model_cache_key = key
+        return self._model_cache
+
+    def _run_preview(self):
+        """Detect on the currently-displayed timepoint only, in memory.
+
+        Writes no CSV and needs no output path — the point is to tune
+        `prob_thresh` / `min_distance` against one volume before
+        committing to the whole series.
+        """
+        name = self._image_combo.currentText()
+        if not name:
+            show_error("No input layer selected.")
+            return
+        layer = self.viewer.layers[name]
+        files = layer.metadata.get("source_files")
+        if not files:
+            show_error(
+                "Selected layer has no source files (open the folder via "
+                "File > Open, drag-and-drop, or the napari CLI)."
+            )
+            return
+
+        step = self.viewer.dims.current_step
+        t = int(step[0]) if len(step) else 0
+        # The viewer's dims can outrun the layer (another, longer layer
+        # selected, or a stale step after a reload) — clamp, don't IndexError.
+        t = max(0, min(t, len(files) - 1))
+
+        device = _get_device(use_gpu=self._use_gpu_check.isChecked())
+        try:
+            model = self._load_model_cached(self._model_combo.currentText(), device)
+        except Exception as exc:
+            show_error(f"Could not load model "
+                       f"{self._model_combo.currentText()!r}: {exc}")
+            return
+
+        try:
+            volume = read_volume(files[t])
+            points, _details = detect_spots_3d(
+                volume,
+                model,
+                prob_thresh=self._prob_thresh_spin.value(),
+                min_distance=self._min_distance_spin.value(),
+            )
+        except Exception as exc:
+            show_error(f"Preview failed on timepoint {t}: {exc}")
+            return
+
+        # One preview layer, updated in place: tuning means clicking this
+        # repeatedly, and a layer per click would bury the viewer.
+        preview_name = f"{layer.name} (spot preview)"
+        if preview_name in self.viewer.layers:
+            self.viewer.layers[preview_name].data = points
+        else:
+            # Points here are (z, y, x) for a single volume, so the source
+            # layer's scale minus its leading T entry.
+            self.viewer.add_points(
+                points,
+                name=preview_name,
+                scale=layer.scale[1:],
+                face_color="transparent",
+                border_color="red",
+            )
+        show_info(
+            f"Preview: {len(points)} spots on timepoint {t} "
+            "(nothing written to disk)."
+        )
+
     def _run_detection(self):
         name = self._image_combo.currentText()
         if not name:
@@ -166,7 +256,9 @@ class DetectionWidget3D(QWidget):
         # available, instead of erroring deep inside Spotiflow.
         device = _get_device(use_gpu=self._use_gpu_check.isChecked())
         try:
-            model = load_model(self._model_combo.currentText(), device=device)
+            # Cached: previewing and then running the same model is the
+            # expected flow, and that should not re-load the weights.
+            model = self._load_model_cached(self._model_combo.currentText(), device)
         except Exception as exc:
             # A bad model name, a missing/corrupt checkpoint folder, or a
             # failed weight download must not raise out of a Qt slot.

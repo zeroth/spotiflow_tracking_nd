@@ -20,7 +20,11 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from napari_spotiflow_tracking_nd._io3d import build_lazy_stack_from_files, compute_layer_scale
+from napari_spotiflow_tracking_nd._io3d import (
+    build_lazy_stack_from_files,
+    compute_layer_scale,
+    read_volume,
+)
 from napari_spotiflow_tracking_nd._preprocessing3d import (
     _get_device,
     apply_calculation,
@@ -105,7 +109,9 @@ class PreProcessingWidget3D(QWidget):
         bg_layout.addWidget(self._bg_sigma_spin)
         self._bg_use_gpu_check = QCheckBox("Use GPU")
         bg_layout.addWidget(self._bg_use_gpu_check)
+        self._bg_preview_btn = QPushButton("Preview")
         self._bg_run_btn = QPushButton("Run")
+        bg_layout.addWidget(self._bg_preview_btn)
         bg_layout.addWidget(self._bg_run_btn)
         layout.addWidget(bg_group)
 
@@ -118,7 +124,9 @@ class PreProcessingWidget3D(QWidget):
         self._blur_sigma_spin.setRange(0.0, 200.0)
         self._blur_sigma_spin.setValue(1.0)
         blur_layout.addWidget(self._blur_sigma_spin)
+        self._blur_preview_btn = QPushButton("Preview")
         self._blur_run_btn = QPushButton("Run")
+        blur_layout.addWidget(self._blur_preview_btn)
         blur_layout.addWidget(self._blur_run_btn)
         layout.addWidget(blur_group)
 
@@ -132,7 +140,9 @@ class PreProcessingWidget3D(QWidget):
         self._calc_value_spin = QSpinBox()
         self._calc_value_spin.setRange(0, 65535)
         calc_layout.addWidget(self._calc_value_spin)
+        self._calc_preview_btn = QPushButton("Preview")
         self._calc_run_btn = QPushButton("Run")
+        calc_layout.addWidget(self._calc_preview_btn)
         calc_layout.addWidget(self._calc_run_btn)
         layout.addWidget(calc_group)
 
@@ -153,6 +163,9 @@ class PreProcessingWidget3D(QWidget):
         self._bg_run_btn.clicked.connect(self._run_remove_background)
         self._blur_run_btn.clicked.connect(self._run_gaussian_blur)
         self._calc_run_btn.clicked.connect(self._run_arithmetic)
+        self._bg_preview_btn.clicked.connect(self._preview_remove_background)
+        self._blur_preview_btn.clicked.connect(self._preview_gaussian_blur)
+        self._calc_preview_btn.clicked.connect(self._preview_arithmetic)
         # Populate once up front: `layers.events.inserted` only fires for
         # layers added *after* this point, so a widget opened on a viewer
         # that already has images would otherwise start with an empty combo.
@@ -241,6 +254,66 @@ class PreProcessingWidget3D(QWidget):
                 return None
         return out
 
+    def _current_timepoint_volume(self, layer):
+        """Read just the currently-displayed timepoint off disk.
+
+        Returns `(volume, t)`, or `(None, None)` after `show_error`. This
+        is what makes preview quick: one file instead of the whole series.
+        """
+        files = layer.metadata.get("source_files")
+        if not files:
+            show_error(
+                "Selected layer has no source files (open the folder via "
+                "File > Open, drag-and-drop, or the napari CLI)."
+            )
+            return None, None
+
+        step = self.viewer.dims.current_step
+        t = int(step[0]) if len(step) else 0
+        # The viewer's dims can outrun the layer (another, longer layer
+        # selected, or a stale step after a reload) — clamp rather than
+        # IndexError.
+        t = max(0, min(t, len(files) - 1))
+
+        try:
+            return read_volume(files[t]), t
+        except (OSError, ValueError) as exc:
+            show_error(f"Could not read timepoint {t}: {exc}")
+            return None, None
+
+    def _show_preview_layer(self, name: str, data, source_layer):
+        """Add the preview layer, or update it in place if it already
+        exists — tuning means clicking Preview repeatedly, and a new layer
+        per click would bury the viewer."""
+        if name in self.viewer.layers:
+            self.viewer.layers[name].data = data
+        else:
+            # A single (Z, Y, X) volume, so the source layer's scale minus
+            # its leading T entry.
+            self.viewer.add_image(data, name=name, scale=source_layer.scale[1:])
+
+    def _run_preview(self, op, op_kwargs: dict, kind: str):
+        """Apply `op` to the current timepoint only, in memory.
+
+        Writes nothing, and needs no output folder — the point is to tune
+        parameters before committing to a whole-series run.
+        """
+        layer = self._get_input_layer()
+        if layer is None:
+            return
+        volume, t = self._current_timepoint_volume(layer)
+        if volume is None:
+            return
+
+        try:
+            result = op(volume, **op_kwargs)
+        except Exception as exc:
+            show_error(f"Preview failed: {exc}")
+            return
+
+        self._show_preview_layer(f"{layer.name} ({kind} preview)", result, layer)
+        show_info(f"Preview: {kind} on timepoint {t} (nothing written to disk).")
+
     def _run_op(self, op, op_kwargs: dict, suffix: str):
         layer = self._get_input_layer()
         if layer is None:
@@ -295,24 +368,57 @@ class PreProcessingWidget3D(QWidget):
         # `QThread` API is kept so a future phase can switch to `worker.start()`
         # without changing this call site's signal wiring.
 
-    def _run_remove_background(self):
+    # ── Op builders ──────────────────────────────────────────────────
+    # Each returns (op, kwargs, run_suffix, preview_kind). `run_suffix`
+    # carries the parameters, so every run makes a distinctly-named output
+    # layer; `preview_kind` deliberately does not, so repeated previews
+    # replace one layer instead of stacking one per parameter value.
+
+    def _bg_op(self):
         # `_get_device` falls back to "cpu" when CUDA isn't actually
         # available, instead of erroring deep inside the torch call.
         device = _get_device(use_gpu=self._bg_use_gpu_check.isChecked())
-        self._run_op(
+        sigma = self._bg_sigma_spin.value()
+        return (
             remove_background_high_pass_3d,
-            {"sigma": self._bg_sigma_spin.value(), "device": device},
-            f"bg s={self._bg_sigma_spin.value()}",
+            {"sigma": sigma, "device": device},
+            f"bg s={sigma}",
+            "bg",
         )
 
-    def _run_gaussian_blur(self):
-        self._run_op(
-            gaussian_blur_3d,
-            {"sigma": self._blur_sigma_spin.value()},
-            f"blur s={self._blur_sigma_spin.value()}",
-        )
+    def _blur_op(self):
+        sigma = self._blur_sigma_spin.value()
+        return gaussian_blur_3d, {"sigma": sigma}, f"blur s={sigma}", "blur"
 
-    def _run_arithmetic(self):
+    def _calc_op(self):
         op = self._calc_op_combo.currentText()
         value = self._calc_value_spin.value()
-        self._run_op(apply_calculation, {"op": op, "value": value}, f"{op} {value}")
+        return apply_calculation, {"op": op, "value": value}, f"{op} {value}", "calc"
+
+    # ── Run (whole series) ───────────────────────────────────────────
+
+    def _run_remove_background(self):
+        op, kwargs, suffix, _kind = self._bg_op()
+        self._run_op(op, kwargs, suffix)
+
+    def _run_gaussian_blur(self):
+        op, kwargs, suffix, _kind = self._blur_op()
+        self._run_op(op, kwargs, suffix)
+
+    def _run_arithmetic(self):
+        op, kwargs, suffix, _kind = self._calc_op()
+        self._run_op(op, kwargs, suffix)
+
+    # ── Preview (current timepoint only) ─────────────────────────────
+
+    def _preview_remove_background(self):
+        op, kwargs, _suffix, kind = self._bg_op()
+        self._run_preview(op, kwargs, kind)
+
+    def _preview_gaussian_blur(self):
+        op, kwargs, _suffix, kind = self._blur_op()
+        self._run_preview(op, kwargs, kind)
+
+    def _preview_arithmetic(self):
+        op, kwargs, _suffix, kind = self._calc_op()
+        self._run_preview(op, kwargs, kind)

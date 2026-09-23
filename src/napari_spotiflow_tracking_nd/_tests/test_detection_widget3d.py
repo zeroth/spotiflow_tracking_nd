@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pandas as pd
 import pytest
+import tifffile
 
 from napari_spotiflow_tracking_nd._tests.conftest import write_timepoint_folder
 
@@ -29,7 +30,8 @@ class TestDetectionWidget3DCreation:
         for attr in (
             "_image_combo", "_model_combo", "_browse_model_btn",
             "_prob_thresh_spin", "_min_distance_spin",
-            "_csv_path_edit", "_browse_csv_btn", "_run_btn", "_progress_bar",
+            "_csv_path_edit", "_browse_csv_btn", "_run_btn", "_preview_btn",
+            "_progress_bar",
         ):
             assert hasattr(widget, attr), f"missing {attr}"
 
@@ -302,3 +304,150 @@ class TestCalibrationIsThreadedThrough:
             "voxel_size_z_um": None,
             "frame_interval_s": None,
         }
+
+
+class TestPreview:
+    """Quick mode: detect on the currently-displayed timepoint only, so
+    prob_thresh / min_distance can be tuned before a whole-series run."""
+
+    @staticmethod
+    def _setup(widget, viewer, tmp_path, n_timepoints=3):
+        files = write_timepoint_folder(tmp_path / "in", n_timepoints=n_timepoints,
+                                       shape=(4, 16, 16))
+        viewer.add_image(
+            np.zeros((n_timepoints, 4, 16, 16), dtype=np.uint16),
+            name="vol",
+            scale=(1.0, 0.210, 0.104, 0.104),
+            metadata={"source_files": files},
+        )
+        widget._image_combo.setCurrentText("vol")
+        return files
+
+    @staticmethod
+    def _mock_model(n_spots=2):
+        model = MagicMock()
+        details = MagicMock()
+        details.prob = np.array([0.9, 0.7][:n_spots])
+        model.predict.return_value = (
+            np.array([[1, 2, 3], [2, 4, 6]][:n_spots]), details,
+        )
+        return model
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_previews_the_current_timepoint_without_writing_a_csv(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        files = self._setup(widget, viewer, tmp_path)
+        seen = {}
+
+        def _predict(volume, **kwargs):
+            seen["volume"] = volume
+            details = MagicMock()
+            details.prob = np.array([0.9])
+            return np.array([[1, 2, 3]]), details
+
+        model = MagicMock()
+        model.predict.side_effect = _predict
+        mock_load_model.return_value = model
+
+        viewer.dims.set_current_step(0, 2)  # look at timepoint 2
+        # No CSV path set at all — preview must still work.
+        assert widget._csv_path_edit.text() == ""
+        widget._run_preview()
+
+        # It read timepoint 2 off disk, not the whole series.
+        assert np.array_equal(seen["volume"], tifffile.imread(str(files[2])))
+        assert model.predict.call_count == 1
+        assert not list(tmp_path.glob("*.csv"))
+
+        points = viewer.layers["vol (spot preview)"]
+        assert len(points.data) == 1
+        # A single volume's points are (z, y, x) — the source layer's
+        # scale without its leading T entry.
+        assert tuple(points.scale) == (0.210, 0.104, 0.104)
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_repeated_previews_reuse_the_loaded_model(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        self._setup(widget, viewer, tmp_path)
+        mock_load_model.return_value = self._mock_model()
+
+        widget._run_preview()
+        widget._prob_thresh_spin.setValue(0.9)  # tune, preview again
+        widget._run_preview()
+
+        # Re-loading the weights on every click is what makes preview slow.
+        assert mock_load_model.call_count == 1
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_changing_the_model_reloads_it(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        self._setup(widget, viewer, tmp_path)
+        mock_load_model.return_value = self._mock_model()
+
+        widget._model_combo.setCurrentText("synth_3d")
+        widget._run_preview()
+        widget._model_combo.setCurrentText("smfish_3d")
+        widget._run_preview()
+
+        assert mock_load_model.call_count == 2
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_repeated_previews_replace_one_layer_rather_than_stacking(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        self._setup(widget, viewer, tmp_path)
+        mock_load_model.return_value = self._mock_model()
+
+        widget._run_preview()
+        widget._run_preview()
+
+        points_layers = [l for l in viewer.layers if l.__class__.__name__ == "Points"]
+        assert len(points_layers) == 1
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_a_stale_timepoint_beyond_the_series_is_clamped(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        viewer.add_image(np.zeros((10, 4, 16, 16), dtype=np.uint16), name="longer")
+        self._setup(widget, viewer, tmp_path, n_timepoints=2)
+        mock_load_model.return_value = self._mock_model()
+        viewer.dims.set_current_step(0, 9)
+
+        widget._run_preview()  # must not IndexError
+
+        assert "vol (spot preview)" in viewer.layers
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_a_failing_model_load_shows_an_error_instead_of_raising(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        self._setup(widget, viewer, tmp_path)
+        mock_load_model.side_effect = RuntimeError("no such checkpoint")
+
+        with patch(
+            "napari_spotiflow_tracking_nd._detection_widget3d.show_error"
+        ) as mock_show_error:
+            widget._run_preview()  # must not raise
+
+        assert mock_show_error.called
+
+    def test_preview_without_source_files_shows_an_error(self, detection_widget):
+        widget, viewer = detection_widget
+        viewer.add_image(np.zeros((2, 4, 8, 8), dtype=np.uint16), name="plain")
+        widget._image_combo.setCurrentText("plain")
+
+        with patch(
+            "napari_spotiflow_tracking_nd._detection_widget3d.show_error"
+        ) as mock_show_error:
+            widget._run_preview()  # must not raise
+
+        assert mock_show_error.called

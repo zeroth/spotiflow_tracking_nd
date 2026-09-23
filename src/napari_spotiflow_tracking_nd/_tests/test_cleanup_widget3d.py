@@ -43,6 +43,7 @@ class TestPreProcessingWidget3DCreation:
             "_bg_sigma_spin", "_bg_use_gpu_check", "_bg_run_btn",
             "_blur_sigma_spin", "_blur_run_btn",
             "_calc_op_combo", "_calc_value_spin", "_calc_run_btn",
+            "_bg_preview_btn", "_blur_preview_btn", "_calc_preview_btn",
         ):
             assert hasattr(widget, attr), f"missing {attr}"
 
@@ -255,6 +256,94 @@ class TestOutputReloadUsesOnlyWhatWasWritten:
         assert all(
             "leftover" not in p.name for p in new_layer.metadata["source_files"]
         )
+
+
+class TestPreview:
+    """Quick mode: apply an op to the currently-displayed timepoint only,
+    in memory, so parameters can be tuned before a whole-series run."""
+
+    def test_previews_the_currently_displayed_timepoint(self, preproc_widget, tmp_path):
+        from napari_spotiflow_tracking_nd._preprocessing3d import apply_calculation
+
+        widget, viewer = preproc_widget
+        files = write_timepoint_folder(tmp_path, n_timepoints=3, shape=(4, 8, 8))
+        _add_and_select(widget, viewer, tmp_path)
+
+        viewer.dims.set_current_step(0, 1)  # look at timepoint 1
+        widget._calc_op_combo.setCurrentText("add")
+        widget._calc_value_spin.setValue(10)
+        widget._preview_arithmetic()
+
+        preview = viewer.layers[f"{tmp_path.name} (calc preview)"]
+        expected = apply_calculation(tifffile.imread(str(files[1])), "add", 10)
+        assert np.array_equal(np.asarray(preview.data), expected)
+
+    def test_preview_writes_nothing_and_needs_no_output_folder(self, preproc_widget, tmp_path):
+        widget, viewer = preproc_widget
+        in_dir = tmp_path / "in"
+        write_timepoint_folder(in_dir, n_timepoints=2, shape=(4, 8, 8))
+        _add_and_select(widget, viewer, in_dir)
+        before = sorted(p.name for p in tmp_path.rglob("*"))
+
+        # No output folder set at all — preview must still work.
+        assert widget._output_folder_edit.text() == ""
+        widget._preview_gaussian_blur()
+
+        assert sorted(p.name for p in tmp_path.rglob("*")) == before
+        assert f"{in_dir.name} (blur preview)" in viewer.layers
+
+    def test_repeated_previews_replace_one_layer_rather_than_stacking(
+        self, preproc_widget, tmp_path
+    ):
+        widget, viewer = preproc_widget
+        write_timepoint_folder(tmp_path, n_timepoints=2, shape=(4, 8, 8))
+        _add_and_select(widget, viewer, tmp_path)
+
+        widget._blur_sigma_spin.setValue(1.0)
+        widget._preview_gaussian_blur()
+        widget._blur_sigma_spin.setValue(3.0)  # a different parameter value
+        widget._preview_gaussian_blur()
+
+        # The source layer plus exactly one preview layer.
+        assert len(viewer.layers) == 2
+
+    def test_preview_uses_the_source_layers_spatial_scale(self, preproc_widget, tmp_path):
+        widget, viewer = preproc_widget
+        write_timepoint_folder(tmp_path, n_timepoints=2, shape=(4, 8, 8))
+        _add_and_select(widget, viewer, tmp_path)
+        widget._pixel_size_xy_spin.setValue(0.104)
+        widget._voxel_size_z_spin.setValue(0.210)
+        widget._apply_calibration()
+
+        widget._preview_gaussian_blur()
+
+        preview = viewer.layers[f"{tmp_path.name} (blur preview)"]
+        # A single (Z, Y, X) volume: the source's scale without its T entry.
+        assert tuple(preview.scale) == (0.210, 0.104, 0.104)
+
+    def test_a_stale_timepoint_beyond_the_series_is_clamped(self, preproc_widget, tmp_path):
+        widget, viewer = preproc_widget
+        # A longer layer drags the viewer's dims past the short one's range.
+        viewer.add_image(np.zeros((10, 4, 8, 8), dtype=np.uint16), name="longer")
+        write_timepoint_folder(tmp_path, n_timepoints=2, shape=(4, 8, 8))
+        _add_and_select(widget, viewer, tmp_path)
+        viewer.dims.set_current_step(0, 9)
+
+        widget._preview_gaussian_blur()  # must not IndexError
+
+        assert f"{tmp_path.name} (blur preview)" in viewer.layers
+
+    def test_preview_without_source_files_shows_an_error(self, preproc_widget):
+        widget, viewer = preproc_widget
+        viewer.add_image(np.zeros((2, 4, 8, 8), dtype=np.uint16), name="plain")
+        widget._image_combo.setCurrentText("plain")
+
+        with patch(
+            "napari_spotiflow_tracking_nd._cleanup_widget3d.show_error"
+        ) as mock_show_error:
+            widget._preview_gaussian_blur()  # must not raise
+
+        assert mock_show_error.called
 
 
 class TestRunWithoutSourceFiles:

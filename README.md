@@ -22,6 +22,13 @@ whole-movie-in-RAM) version this plugin is ported from.
   and add/subtract arithmetic, each streamed volume-by-volume and written
   to an output folder of per-timepoint TIFFs (same filenames as the
   input — no zarr).
+- **Quick mode (Preview)** — every operation, and detection, has a
+  **Preview** button that runs on the **currently displayed timepoint
+  only**, in memory: one file read instead of the whole series, nothing
+  written to disk, and no output folder or CSV path required. Tune sigma
+  / `prob_thresh` / `min_distance` against one volume, then commit to the
+  full run. Repeated previews update a single layer rather than stacking
+  one per click, and the detection model stays loaded between previews.
 - **Spot detection** — [Spotiflow](https://github.com/weigertlab/spotiflow)
   3D models, picked from a drop-down of the built-ins (`synth_3d`,
   `smfish_3d`) or set to a custom checkpoint folder (the drop-down is
