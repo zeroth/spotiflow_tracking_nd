@@ -195,3 +195,138 @@ class TestDetectionWorker3D:
         worker.run()
 
         assert errors == ["model exploded"]
+
+
+class TestFunctionWorker3D:
+    def test_emits_the_callables_return_value(self):
+        from napari_spotiflow_tracking_nd._workers3d import FunctionWorker3D
+
+        results = []
+        worker = FunctionWorker3D(lambda: {"spots": 3})
+        worker.run_finished.connect(results.append)
+
+        worker.run()
+
+        assert results == [{"spots": 3}]
+
+    def test_passes_args_and_kwargs_through(self):
+        from napari_spotiflow_tracking_nd._workers3d import FunctionWorker3D
+
+        results = []
+        worker = FunctionWorker3D(lambda a, b, c=0: (a, b, c), args=(1, 2), kwargs={"c": 3})
+        worker.run_finished.connect(results.append)
+
+        worker.run()
+
+        assert results == [(1, 2, 3)]
+
+    def test_errored_carries_the_exception_message(self):
+        from napari_spotiflow_tracking_nd._workers3d import FunctionWorker3D
+
+        def _boom():
+            raise RuntimeError("preview blew up")
+
+        errors = []
+        worker = FunctionWorker3D(_boom)
+        worker.errored.connect(errors.append)
+
+        worker.run()
+
+        assert errors == ["preview blew up"]
+
+    def test_cancel_suppresses_the_result(self):
+        # A single blocking call can't be interrupted, so cancel means
+        # "abandon the result", not "stop the work".
+        from napari_spotiflow_tracking_nd._workers3d import FunctionWorker3D
+
+        results = []
+        worker = FunctionWorker3D(lambda: "too late")
+        worker.run_finished.connect(results.append)
+        worker.cancel()
+
+        worker.run()
+
+        assert results == []
+
+    def test_cancel_also_suppresses_an_error(self):
+        # An abandoned preview that happens to fail should not pop an error
+        # dialog for a result nobody is waiting for.
+        from napari_spotiflow_tracking_nd._workers3d import FunctionWorker3D
+
+        def _boom():
+            raise RuntimeError("nobody cares")
+
+        errors = []
+        worker = FunctionWorker3D(_boom)
+        worker.errored.connect(errors.append)
+        worker.cancel()
+
+        worker.run()
+
+        assert errors == []
+
+
+class TestDetectionWorkerLazyModel:
+    """`model` may be a zero-arg callable, so the slow first weight load
+    happens on the worker thread instead of freezing the UI first."""
+
+    @staticmethod
+    def _one_spot_model():
+        model = MagicMock()
+        details = MagicMock()
+        details.prob = np.array([0.9])
+        model.predict.return_value = (np.array([[1, 2, 3]]), details)
+        return model
+
+    def test_a_callable_model_is_resolved_inside_run(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
+
+        files = write_timepoint_folder(tmp_path, n_timepoints=2, shape=(4, 8, 8))
+        model = self._one_spot_model()
+        calls = []
+
+        def _factory():
+            calls.append(len(calls))
+            return model
+
+        worker = DetectionWorker3D(
+            files=files, model=_factory, csv_path=tmp_path / "spots.csv",
+        )
+
+        assert calls == [], "the factory must not run at construction time"
+
+        worker.run()
+
+        assert calls == [0], "resolved exactly once, inside run()"
+        assert (tmp_path / "spots.csv").exists()
+
+    def test_a_ready_model_still_works_unchanged(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
+
+        files = write_timepoint_folder(tmp_path, n_timepoints=1, shape=(4, 8, 8))
+        worker = DetectionWorker3D(
+            files=files, model=self._one_spot_model(), csv_path=tmp_path / "spots.csv",
+        )
+
+        worker.run()
+
+        assert (tmp_path / "spots.csv").exists()
+
+    def test_a_failing_model_factory_goes_to_errored(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
+
+        files = write_timepoint_folder(tmp_path, n_timepoints=1, shape=(4, 8, 8))
+
+        def _factory():
+            raise RuntimeError("no such checkpoint")
+
+        errors = []
+        worker = DetectionWorker3D(
+            files=files, model=_factory, csv_path=tmp_path / "spots.csv",
+        )
+        worker.errored.connect(errors.append)
+
+        worker.run()
+
+        assert errors == ["no such checkpoint"]
+        assert not (tmp_path / "spots.csv").exists()

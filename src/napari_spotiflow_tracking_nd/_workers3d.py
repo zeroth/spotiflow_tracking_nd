@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import traceback
 from pathlib import Path
 
 import numpy as np
@@ -73,7 +72,7 @@ class DetectionWorker3D(QThread):
     def __init__(
         self,
         files: list[Path],
-        model,
+        model,  # a loaded model, or a zero-arg callable returning one
         csv_path: Path,
         prob_thresh: float | None = 0.5,
         min_distance: int = 2,
@@ -92,6 +91,12 @@ class DetectionWorker3D(QThread):
 
     def run(self):
         try:
+            # `model` may be a zero-arg callable so that a slow first
+            # weight load happens here, on the worker thread, rather than
+            # freezing the UI before this thread even starts. Resolved
+            # once, and a failure lands on `errored` like any other.
+            if callable(self._model) and not hasattr(self._model, "predict"):
+                self._model = self._model()
             if self._csv_path.exists():
                 self._csv_path.unlink()
             header_written = False
@@ -126,3 +131,37 @@ class DetectionWorker3D(QThread):
             self.run_finished.emit(str(self._csv_path))
         except Exception as exc:
             self.errored.emit(str(exc))
+
+
+class FunctionWorker3D(QThread):
+    """Run one callable on a background thread and hand back its result.
+
+    The two streaming workers above own a loop and can stop between
+    iterations. This one carries a single blocking call — a preview of one
+    volume — so `cancel()` cannot interrupt it. Cancelling only suppresses
+    the result; the thread still runs to completion in the background.
+    """
+
+    run_finished = Signal(object)  # whatever `fn` returned
+    # `run_finished`, not `finished` — see `VolumeOpWorker3D` for why.
+    errored = Signal(str)
+
+    def __init__(self, fn, args=(), kwargs=None, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+        self._args = tuple(args)
+        self._kwargs = dict(kwargs or {})
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        try:
+            result = self._fn(*self._args, **self._kwargs)
+        except Exception as exc:
+            if not self._cancelled:
+                self.errored.emit(str(exc))
+            return
+        if not self._cancelled:
+            self.run_finished.emit(result)
