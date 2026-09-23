@@ -53,6 +53,10 @@ def test_preprocessing_output_layer_is_consumable_by_the_detection_widget(
 
     # ── Task 5: apply calibration, then run a real pre-processing op ─────
     preproc = PreProcessingWidget3D(viewer)
+    # Runs are threaded now; this test asserts immediately after each call,
+    # so drive the workers synchronously through the seam. Real threading
+    # is covered by test_threading.py.
+    preproc._launch_worker = lambda worker: worker.run()
     preproc._image_combo.setCurrentText(raw_layer.name)
     preproc._pixel_size_xy_spin.setValue(0.104)
     preproc._voxel_size_z_spin.setValue(0.210)
