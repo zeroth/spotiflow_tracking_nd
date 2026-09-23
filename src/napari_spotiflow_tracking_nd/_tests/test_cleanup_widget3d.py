@@ -19,6 +19,9 @@ def preproc_widget(make_napari_viewer):
 
     viewer = make_napari_viewer()
     widget = PreProcessingWidget3D(viewer)
+    # Run the worker synchronously: these tests assert immediately after
+    # the call, and the real threading is covered by test_threading.py.
+    widget._launch_worker = lambda worker: worker.run()
     return widget, viewer
 
 
@@ -49,6 +52,7 @@ class TestPreProcessingWidget3DCreation:
             "_bg_sigma_spin", "_bg_use_gpu_check", "_bg_run_btn",
             "_blur_sigma_spin", "_blur_run_btn",
             "_calc_op_combo", "_calc_value_spin", "_calc_run_btn",
+            "_cancel_btn", "_status_label",
             "_bg_preview_btn", "_blur_preview_btn", "_calc_preview_btn",
         ):
             assert hasattr(widget, attr), f"missing {attr}"
@@ -367,3 +371,61 @@ class TestRunWithoutSourceFiles:
 
         assert mock_show_error.called
         assert len(viewer.layers) == 1
+
+
+class TestThreadedRunWiring:
+    def test_run_uses_the_run_state_machine(self, preproc_widget, tmp_path):
+        widget, viewer = preproc_widget
+        write_timepoint_folder(tmp_path / "in", n_timepoints=2, shape=(4, 16, 16))
+        _add_and_select(widget, viewer, tmp_path / "in")
+        widget._output_folder_edit.setText(str(tmp_path / "out"))
+        widget._calc_value_spin.setValue(5)
+
+        widget._run_arithmetic()
+
+        # Back to idle once the (synchronous) worker finished.
+        assert not widget._is_running
+        assert widget._bg_run_btn.isEnabled()
+        assert not widget._cancel_btn.isEnabled()
+        assert widget._status_label.text() == "Done."
+
+    def test_a_cancelled_run_keeps_and_labels_the_partial_output(
+        self, preproc_widget, tmp_path
+    ):
+        widget, viewer = preproc_widget
+        in_dir = tmp_path / "in"
+        out_dir = tmp_path / "out"
+        write_timepoint_folder(in_dir, n_timepoints=4, shape=(4, 16, 16))
+        _add_and_select(widget, viewer, in_dir)
+        widget._output_folder_edit.setText(str(out_dir))
+        widget._calc_value_spin.setValue(5)
+
+        # Cancel as soon as the first volume is reported done.
+        def _launch(worker):
+            worker.progress.connect(lambda cur, total: widget._request_cancel())
+            worker.run()
+
+        widget._launch_worker = _launch
+        widget._run_arithmetic()
+
+        # Nothing deleted, and the layer says how far it got.
+        assert len(list(out_dir.iterdir())) == 1
+        partial = viewer.layers[-1]
+        assert "cancelled 1/4" in partial.name
+        assert len(partial.metadata["source_files"]) == 1
+
+    def test_preview_runs_through_a_worker(self, preproc_widget, tmp_path):
+        widget, viewer = preproc_widget
+        write_timepoint_folder(tmp_path, n_timepoints=2, shape=(4, 8, 8))
+        _add_and_select(widget, viewer, tmp_path)
+
+        widget._preview_gaussian_blur()
+
+        assert f"{tmp_path.name} (blur preview)" in viewer.layers
+        assert not widget._is_running
+        assert widget._status_label.text() == "Done."
+
+    def test_the_blocking_note_is_gone(self, preproc_widget):
+        # It apologised for a freeze that no longer happens.
+        widget, _ = preproc_widget
+        assert not hasattr(widget, "_blocking_note")

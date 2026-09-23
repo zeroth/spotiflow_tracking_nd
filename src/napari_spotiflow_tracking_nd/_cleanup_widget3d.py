@@ -31,14 +31,14 @@ from napari_spotiflow_tracking_nd._preprocessing3d import (
     gaussian_blur_3d,
     remove_background_high_pass_3d,
 )
-from napari_spotiflow_tracking_nd._workers3d import VolumeOpWorker3D
+from napari_spotiflow_tracking_nd._run_state import RunStateMixin
+from napari_spotiflow_tracking_nd._workers3d import FunctionWorker3D, VolumeOpWorker3D
 
 
-class PreProcessingWidget3D(QWidget):
+class PreProcessingWidget3D(RunStateMixin, QWidget):
     def __init__(self, napari_viewer: napari.Viewer):
         super().__init__()
         self.viewer = napari_viewer
-        self._worker: VolumeOpWorker3D | None = None
         self._setup_ui()
         self._connect_events()
 
@@ -151,14 +151,31 @@ class PreProcessingWidget3D(QWidget):
 
         # ── Progress ─────────────────────────────────────────────────
         self._progress_bar = QProgressBar()
+        self._progress_bar.setFormat("%v / %m")
         layout.addWidget(self._progress_bar)
-        self._blocking_note = QLabel(
-            "Note: a run blocks the napari window until it finishes (Phase 1 "
-            "runs synchronously). It is working, not hung."
+
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setToolTip(
+            "Stops after the volume currently being written. A preview is a "
+            "single call and cannot be interrupted — cancelling discards its "
+            "result."
         )
-        self._blocking_note.setWordWrap(True)
-        layout.addWidget(self._blocking_note)
+        layout.addWidget(self._cancel_btn)
+
+        self._status_label = QLabel()
+        self._status_label.setWordWrap(True)
+        layout.addWidget(self._status_label)
         layout.addStretch()
+
+        self._init_run_state(
+            run_buttons=[
+                self._bg_run_btn, self._blur_run_btn, self._calc_run_btn,
+                self._bg_preview_btn, self._blur_preview_btn, self._calc_preview_btn,
+            ],
+            cancel_button=self._cancel_btn,
+            progress_bar=self._progress_bar,
+            status_label=self._status_label,
+        )
 
     def _connect_events(self):
         self.viewer.layers.events.inserted.connect(self._refresh_image_combo)
@@ -308,14 +325,16 @@ class PreProcessingWidget3D(QWidget):
         if volume is None:
             return
 
-        try:
-            result = op(volume, **op_kwargs)
-        except Exception as exc:
-            show_error(f"Preview failed: {exc}")
-            return
+        worker = FunctionWorker3D(op, args=(volume,), kwargs=op_kwargs)
 
-        self._show_preview_layer(f"{layer.name} ({kind} preview)", result, layer)
-        show_info(f"Preview: {kind} on timepoint {t} (nothing written to disk).")
+        def _on_finished(result):
+            self._show_preview_layer(f"{layer.name} ({kind} preview)", result, layer)
+            show_info(f"Preview: {kind} on timepoint {t} (nothing written to disk).")
+
+        self._begin_run(
+            worker, total=1, description=f"Previewing {kind} on timepoint {t}",
+            on_finished=_on_finished,
+        )
 
     def _run_op(self, op, op_kwargs: dict, suffix: str):
         layer = self._get_input_layer()
@@ -332,12 +351,7 @@ class PreProcessingWidget3D(QWidget):
         if output_dir is None:
             return
 
-        self._progress_bar.setMaximum(len(files))
-        self._progress_bar.setValue(0)
-
         worker = VolumeOpWorker3D(files=files, output_dir=output_dir, op=op, op_kwargs=op_kwargs)
-        worker.progress.connect(lambda cur, total: self._progress_bar.setValue(cur))
-        worker.errored.connect(show_error)
 
         def _on_finished(written_paths):
             if not written_paths:
@@ -354,7 +368,9 @@ class PreProcessingWidget3D(QWidget):
                 return
             self.viewer.add_image(
                 stack,
-                name=f"{layer.name} ({suffix})",
+                # A cancelled run is still loaded — with its partial state
+                # in the name, so it is never mistaken for a full one.
+                name=f"{layer.name} ({suffix}){self.cancelled_suffix()}",
                 scale=layer.scale,
                 metadata={
                     "source_files": out_files,
@@ -365,11 +381,9 @@ class PreProcessingWidget3D(QWidget):
             )
             show_info(f"Wrote {len(written_paths)} volumes to {output_dir}")
 
-        worker.run_finished.connect(_on_finished)
-        self._worker = worker
-        worker.run()  # Phase 1: run synchronously on the calling thread; the
-        # `QThread` API is kept so a future phase can switch to `worker.start()`
-        # without changing this call site's signal wiring.
+        self._begin_run(
+            worker, total=len(files), description=f"Running {suffix}", on_finished=_on_finished,
+        )
 
     # ── Op builders ──────────────────────────────────────────────────
     # Each returns (op, kwargs, run_suffix, preview_kind). `run_suffix`
