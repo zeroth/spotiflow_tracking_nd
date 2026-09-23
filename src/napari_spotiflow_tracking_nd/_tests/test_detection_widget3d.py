@@ -17,6 +17,9 @@ def detection_widget(make_napari_viewer):
 
     viewer = make_napari_viewer()
     widget = DetectionWidget3D(viewer)
+    # Synchronous through the seam; real threading is covered by
+    # test_threading.py.
+    widget._launch_worker = lambda worker: worker.run()
     return widget, viewer
 
 
@@ -38,6 +41,7 @@ class TestDetectionWidget3DCreation:
             "_image_combo", "_model_combo", "_browse_model_btn",
             "_prob_thresh_spin", "_min_distance_spin",
             "_csv_path_edit", "_browse_csv_btn", "_run_btn", "_preview_btn",
+            "_cancel_btn", "_status_label",
             "_progress_bar",
         ):
             assert hasattr(widget, attr), f"missing {attr}"
@@ -207,7 +211,9 @@ class TestRunDetection:
             "napari_spotiflow_tracking_nd._detection_widget3d.load_model",
             side_effect=RuntimeError("no weights for you"),
         ), patch(
-            "napari_spotiflow_tracking_nd._detection_widget3d.show_error"
+            # The run-state mixin reports worker failures, so this is
+            # where `show_error` is looked up now.
+            "napari_spotiflow_tracking_nd._run_state.show_error"
         ) as mock_show_error:
             widget._run_detection()  # must not raise
 
@@ -441,11 +447,14 @@ class TestPreview:
         mock_load_model.side_effect = RuntimeError("no such checkpoint")
 
         with patch(
-            "napari_spotiflow_tracking_nd._detection_widget3d.show_error"
+            "napari_spotiflow_tracking_nd._run_state.show_error"
         ) as mock_show_error:
             widget._run_preview()  # must not raise
 
         assert mock_show_error.called
+        # The message must still name the model, not just echo the
+        # library error.
+        assert "no such checkpoint" in str(mock_show_error.call_args)
 
     def test_preview_without_source_files_shows_an_error(self, detection_widget):
         widget, viewer = detection_widget
@@ -458,3 +467,125 @@ class TestPreview:
             widget._run_preview()  # must not raise
 
         assert mock_show_error.called
+
+
+class TestThreadedDetectionWiring:
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_run_returns_to_idle_via_the_state_machine(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        files = write_timepoint_folder(tmp_path / "in", n_timepoints=2, shape=(4, 16, 16))
+        model = MagicMock()
+        details = MagicMock()
+        details.prob = np.array([0.8])
+        model.predict.return_value = (np.array([[1, 2, 3]]), details)
+        mock_load_model.return_value = model
+
+        viewer.add_image(
+            np.zeros((2, 4, 16, 16), dtype=np.uint16), name="vol",
+            metadata={"source_files": files},
+        )
+        widget._image_combo.setCurrentText("vol")
+        widget._csv_path_edit.setText(str(tmp_path / "spots.csv"))
+
+        widget._run_detection()
+
+        assert not widget._is_running
+        assert widget._run_btn.isEnabled()
+        assert not widget._cancel_btn.isEnabled()
+        assert widget._status_label.text() == "Done."
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_the_model_is_loaded_inside_the_worker_not_before_it(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        # A first weight load is slow; doing it on the main thread would
+        # freeze the UI before the worker even started.
+        widget, viewer = detection_widget
+        files = write_timepoint_folder(tmp_path / "in", n_timepoints=1, shape=(4, 16, 16))
+        model = MagicMock()
+        details = MagicMock()
+        details.prob = np.array([0.8])
+        model.predict.return_value = (np.array([[1, 2, 3]]), details)
+        mock_load_model.return_value = model
+
+        viewer.add_image(
+            np.zeros((1, 4, 16, 16), dtype=np.uint16), name="vol",
+            metadata={"source_files": files},
+        )
+        widget._image_combo.setCurrentText("vol")
+        widget._csv_path_edit.setText(str(tmp_path / "spots.csv"))
+
+        loaded_before_launch = {}
+
+        def _launch(worker):
+            loaded_before_launch["value"] = mock_load_model.call_count
+            worker.run()
+
+        widget._launch_worker = _launch
+        widget._run_detection()
+
+        assert loaded_before_launch["value"] == 0, "model was loaded on the main thread"
+        assert mock_load_model.call_count == 1
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_a_cancelled_run_with_no_spots_yet_adds_no_layer(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        # The partial CSV was never created, so the finished handler must
+        # not raise on the missing file or add an empty Points layer.
+        widget, viewer = detection_widget
+        files = write_timepoint_folder(tmp_path / "in", n_timepoints=4, shape=(4, 16, 16))
+        model = MagicMock()
+        details = MagicMock()
+        details.prob = np.empty((0,))
+        model.predict.return_value = (np.empty((0, 3)), details)
+        mock_load_model.return_value = model
+
+        viewer.add_image(
+            np.zeros((4, 4, 16, 16), dtype=np.uint16), name="vol",
+            metadata={"source_files": files},
+        )
+        widget._image_combo.setCurrentText("vol")
+        csv_path = tmp_path / "spots.csv"
+        widget._csv_path_edit.setText(str(csv_path))
+
+        def _launch(worker):
+            worker.progress.connect(lambda cur, total: widget._request_cancel())
+            worker.run()
+
+        widget._launch_worker = _launch
+        widget._run_detection()  # must not raise
+
+        assert not csv_path.exists()
+        assert [l for l in viewer.layers if l.__class__.__name__ == "Points"] == []
+        assert not widget._is_running
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_preview_runs_through_a_worker(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        files = write_timepoint_folder(tmp_path / "in", n_timepoints=2, shape=(4, 16, 16))
+        model = MagicMock()
+        details = MagicMock()
+        details.prob = np.array([0.9])
+        model.predict.return_value = (np.array([[1, 2, 3]]), details)
+        mock_load_model.return_value = model
+
+        viewer.add_image(
+            np.zeros((2, 4, 16, 16), dtype=np.uint16), name="vol",
+            scale=(1.0, 0.21, 0.104, 0.104),
+            metadata={"source_files": files},
+        )
+        widget._image_combo.setCurrentText("vol")
+
+        widget._run_preview()
+
+        assert "vol (spot preview)" in viewer.layers
+        assert not widget._is_running
+
+    def test_the_blocking_note_is_gone(self, detection_widget):
+        widget, _ = detection_widget
+        assert not hasattr(widget, "_blocking_note")

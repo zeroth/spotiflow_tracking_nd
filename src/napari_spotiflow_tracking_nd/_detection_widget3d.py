@@ -29,7 +29,8 @@ from napari_spotiflow_tracking_nd._segmentation3d import (
     detect_spots_3d,
     load_model,
 )
-from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
+from napari_spotiflow_tracking_nd._run_state import RunStateMixin
+from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D, FunctionWorker3D
 
 # Calibration keys copied from the source image layer onto the Points
 # layer, and written to the CSV's sidecar, so a later phase can turn
@@ -44,11 +45,10 @@ def calibration_sidecar_path(csv_path: str | Path) -> Path:
     return Path(csv_path).with_suffix(".json")
 
 
-class DetectionWidget3D(QWidget):
+class DetectionWidget3D(RunStateMixin, QWidget):
     def __init__(self, napari_viewer: napari.Viewer):
         super().__init__()
         self.viewer = napari_viewer
-        self._worker: DetectionWorker3D | None = None
         # Last model loaded, keyed by (name, device). Preview is meant to
         # be clicked repeatedly while tuning, and re-loading the weights
         # every click is by far the slowest part of it.
@@ -129,14 +129,28 @@ class DetectionWidget3D(QWidget):
         layout.addLayout(run_row)
 
         self._progress_bar = QProgressBar()
+        self._progress_bar.setFormat("%v / %m")
         layout.addWidget(self._progress_bar)
-        self._blocking_note = QLabel(
-            "Note: a run blocks the napari window until it finishes (Phase 1 "
-            "runs synchronously). It is working, not hung."
+
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setToolTip(
+            "Stops after the timepoint currently being detected. A preview is "
+            "a single call and cannot be interrupted — cancelling discards its "
+            "result."
         )
-        self._blocking_note.setWordWrap(True)
-        layout.addWidget(self._blocking_note)
+        layout.addWidget(self._cancel_btn)
+
+        self._status_label = QLabel()
+        self._status_label.setWordWrap(True)
+        layout.addWidget(self._status_label)
         layout.addStretch()
+
+        self._init_run_state(
+            run_buttons=[self._run_btn, self._preview_btn],
+            cancel_button=self._cancel_btn,
+            progress_bar=self._progress_bar,
+            status_label=self._status_label,
+        )
 
     def _connect_events(self):
         self.viewer.layers.events.inserted.connect(self._refresh_image_combo)
@@ -173,6 +187,24 @@ class DetectionWidget3D(QWidget):
             self._model_cache_key = key
         return self._model_cache
 
+    def _model_loader(self, model_name: str, device: str):
+        """A zero-arg loader for the workers to call on their own thread.
+
+        Wraps the failure so the message still names the model: the
+        worker's `errored` channel emits `str(exc)` verbatim, so context
+        added here is the only context the user gets.
+        """
+
+        def _load():
+            try:
+                return self._load_model_cached(model_name, device)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Could not load model {model_name!r}: {exc}"
+                ) from exc
+
+        return _load
+
     def _run_preview(self):
         """Detect on the currently-displayed timepoint only, in memory.
 
@@ -200,14 +232,13 @@ class DetectionWidget3D(QWidget):
         t = max(0, min(t, len(files) - 1))
 
         device = _get_device(use_gpu=self._use_gpu_check.isChecked())
-        try:
-            model = self._load_model_cached(self._model_combo.currentText(), device)
-        except Exception as exc:
-            show_error(f"Could not load model "
-                       f"{self._model_combo.currentText()!r}: {exc}")
-            return
+        model_name = self._model_combo.currentText()
 
-        try:
+        def _detect():
+            # Both the model load and the detection happen on the worker
+            # thread; the cache is safe unlocked because only one job runs
+            # at a time.
+            model = self._model_loader(model_name, device)()
             volume = read_volume(files[t])
             points, _details = detect_spots_3d(
                 volume,
@@ -215,28 +246,34 @@ class DetectionWidget3D(QWidget):
                 prob_thresh=self._prob_thresh_spin.value(),
                 min_distance=self._min_distance_spin.value(),
             )
-        except Exception as exc:
-            show_error(f"Preview failed on timepoint {t}: {exc}")
-            return
+            return points
 
-        # One preview layer, updated in place: tuning means clicking this
-        # repeatedly, and a layer per click would bury the viewer.
-        preview_name = f"{layer.name} (spot preview)"
-        if preview_name in self.viewer.layers:
-            self.viewer.layers[preview_name].data = points
-        else:
-            # Points here are (z, y, x) for a single volume, so the source
-            # layer's scale minus its leading T entry.
-            self.viewer.add_points(
-                points,
-                name=preview_name,
-                scale=layer.scale[1:],
-                face_color="transparent",
-                border_color="red",
+        worker = FunctionWorker3D(_detect)
+
+        def _on_finished(points):
+            # One preview layer, updated in place: tuning means clicking
+            # this repeatedly, and a layer per click would bury the viewer.
+            preview_name = f"{layer.name} (spot preview)"
+            if preview_name in self.viewer.layers:
+                self.viewer.layers[preview_name].data = points
+            else:
+                # Points here are (z, y, x) for a single volume, so the
+                # source layer's scale minus its leading T entry.
+                self.viewer.add_points(
+                    points,
+                    name=preview_name,
+                    scale=layer.scale[1:],
+                    face_color="transparent",
+                    border_color="red",
+                )
+            show_info(
+                f"Preview: {len(points)} spots on timepoint {t} "
+                "(nothing written to disk)."
             )
-        show_info(
-            f"Preview: {len(points)} spots on timepoint {t} "
-            "(nothing written to disk)."
+
+        self._begin_run(
+            worker, total=1, description=f"Previewing detection on timepoint {t}",
+            on_finished=_on_finished,
         )
 
     def _run_detection(self):
@@ -260,29 +297,19 @@ class DetectionWidget3D(QWidget):
         # `_get_device` falls back to "cpu" when CUDA isn't actually
         # available, instead of erroring deep inside Spotiflow.
         device = _get_device(use_gpu=self._use_gpu_check.isChecked())
-        try:
-            # Cached: previewing and then running the same model is the
-            # expected flow, and that should not re-load the weights.
-            model = self._load_model_cached(self._model_combo.currentText(), device)
-        except Exception as exc:
-            # A bad model name, a missing/corrupt checkpoint folder, or a
-            # failed weight download must not raise out of a Qt slot.
-            show_error(f"Could not load model "
-                       f"{self._model_combo.currentText()!r}: {exc}")
-            return
+        model_name = self._model_combo.currentText()
 
-        self._progress_bar.setMaximum(len(files))
-        self._progress_bar.setValue(0)
-
+        # Passed as a callable, not a loaded model: resolving it is slow
+        # enough to freeze the UI on its own, so `DetectionWorker3D` calls
+        # this on its own thread. The cache needs no lock because only one
+        # job runs at a time.
         worker = DetectionWorker3D(
             files=files,
-            model=model,
+            model=self._model_loader(model_name, device),
             csv_path=Path(csv_path),
             prob_thresh=self._prob_thresh_spin.value(),
             min_distance=self._min_distance_spin.value(),
         )
-        worker.progress.connect(lambda cur, total: self._progress_bar.setValue(cur))
-        worker.errored.connect(show_error)
 
         def _on_finished(written_csv_path):
             # `DetectionWorker3D` only writes the CSV once at least one
@@ -313,13 +340,14 @@ class DetectionWidget3D(QWidget):
             # since points here are (frame, z, y, x), not just (z, y, x).
             self.viewer.add_points(
                 points,
-                name=f"{layer.name} (spots)",
+                name=f"{layer.name} (spots){self.cancelled_suffix()}",
                 scale=layer.scale,
                 metadata={"csv_path": written_csv_path, **calibration},
                 properties={"prob": df["prob"].to_numpy()},
             )
             show_info(f"Detected {len(df)} spots across {df['frame'].nunique()} timepoints.")
 
-        worker.run_finished.connect(_on_finished)
-        self._worker = worker
-        worker.run()  # Phase 1: synchronous, same rationale as PreProcessingWidget3D._run_op.
+        self._begin_run(
+            worker, total=len(files), description="Detecting spots",
+            on_finished=_on_finished,
+        )
