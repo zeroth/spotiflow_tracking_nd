@@ -234,17 +234,25 @@ class DetectionWidget3D(RunStateMixin, QWidget):
         device = _get_device(use_gpu=self._use_gpu_check.isChecked())
         model_name = self._model_combo.currentText()
 
+        # Read on the main thread, as of the click. The spin boxes stay
+        # live during a run, so reading them inside the worker would hand
+        # back a preview computed at whatever the user nudged them to
+        # meanwhile — labelled as the one they asked for.
+        prob_thresh = self._prob_thresh_spin.value()
+        min_distance = self._min_distance_spin.value()
+        load_the_model = self._model_loader(model_name, device)
+
         def _detect():
             # Both the model load and the detection happen on the worker
             # thread; the cache is safe unlocked because only one job runs
             # at a time.
-            model = self._model_loader(model_name, device)()
+            model = load_the_model()
             volume = read_volume(files[t])
             points, _details = detect_spots_3d(
                 volume,
                 model,
-                prob_thresh=self._prob_thresh_spin.value(),
-                min_distance=self._min_distance_spin.value(),
+                prob_thresh=prob_thresh,
+                min_distance=min_distance,
             )
             return points
 

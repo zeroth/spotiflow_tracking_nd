@@ -9,6 +9,28 @@ copies would drift, so it lives here.
 from __future__ import annotations
 
 from napari.utils.notifications import show_error
+from qtpy.QtWidgets import QApplication
+
+# The widget currently running a job, process-wide. The spec's rule is
+# "exactly one job in flight at a time" — not one per widget: both widgets
+# drive the same GPU, so a pre-processing run and a detection run together
+# is how a long job on a real dataset turns into a CUDA OOM that looks like
+# a plugin bug.
+_ACTIVE_RUN = None
+
+
+def _claim_process_run(owner) -> bool:
+    global _ACTIVE_RUN
+    if _ACTIVE_RUN is not None and _ACTIVE_RUN is not owner:
+        return False
+    _ACTIVE_RUN = owner
+    return True
+
+
+def _release_process_run(owner) -> None:
+    global _ACTIVE_RUN
+    if _ACTIVE_RUN is owner:
+        _ACTIVE_RUN = None
 
 
 class RunStateMixin:
@@ -24,6 +46,7 @@ class RunStateMixin:
         self._progress_bar = progress_bar
         self._status_label = status_label
         self._worker = None
+        self._busy = False
         self._cancel_requested = False
         self._last_progress = (0, 0)
         self._cancel_button.setEnabled(False)
@@ -34,7 +57,9 @@ class RunStateMixin:
 
     @property
     def _is_running(self) -> bool:
-        return self._worker is not None
+        # Busy, not "holds a worker": the worker reference outlives the
+        # result when a real thread is still unwinding (see `_end_run`).
+        return self._busy
 
     def _set_status(self, text: str):
         self._status_label.setText(text)
@@ -61,15 +86,20 @@ class RunStateMixin:
         """Wire `worker` up, flip the UI to busy and launch it.
 
         Returns False without starting anything when a job is already in
-        flight — the button states should already prevent that, but two
-        workers writing the same output folder is bad enough to guard
-        twice.
+        flight — here or in the other widget.
         """
-        if self._is_running:
+        if self._busy:
             show_error("A job is already running — cancel it first.")
+            return False
+        if not _claim_process_run(self):
+            show_error(
+                "Another job is already running in this plugin — wait for it "
+                "to finish or cancel it first."
+            )
             return False
 
         self._worker = worker
+        self._busy = True
         self._cancel_requested = False
         self._last_progress = (0, total)
         # Busy first, then the bar: resetting the bar emits `valueChanged`,
@@ -89,6 +119,11 @@ class RunStateMixin:
         # the UI reports idle; Qt calls slots in connection order.
         worker.run_finished.connect(on_finished)
         worker.run_finished.connect(self._on_run_finished)
+        # `QThread.finished` is the only signal that fires on *every* exit
+        # path, including a cancelled `FunctionWorker3D`, which emits
+        # neither `run_finished` nor `errored` by design. Without this a
+        # cancelled preview would leave the widget busy forever.
+        worker.finished.connect(self._on_worker_thread_finished)
 
         self._launch_worker(worker)
         return True
@@ -99,8 +134,11 @@ class RunStateMixin:
         self._progress_bar.setValue(current)
 
     def _on_errored(self, message: str):
-        show_error(message)
-        self._set_status(f"Failed: {message}")
+        if not self._cancel_requested:
+            show_error(message)
+            self._set_status(f"Failed: {message}")
+        else:
+            self._set_status(f"Cancelled at {self._progress_text()}.")
         self._end_run()
 
     def _on_run_finished(self, _payload=None):
@@ -110,12 +148,33 @@ class RunStateMixin:
             self._set_status("Done.")
         self._end_run()
 
-    def _end_run(self):
+    def _on_worker_thread_finished(self):
+        """The thread has exited — whatever it did or didn't report.
+
+        A cancelled `FunctionWorker3D` suppresses both `run_finished` and
+        `errored`, so this is the only thing that can return the widget to
+        idle in that case.
+        """
+        if self._busy:
+            self._set_status("Cancelled — the result was discarded.")
+            self._end_run()
+        # Safe to release only now: the thread is done with itself.
         self._worker = None
+
+    def _end_run(self):
+        self._busy = False
+        _release_process_run(self)
         self._set_busy(False)
+        worker = self._worker
+        # Dropping the last reference to a *running* `QThread` risks Qt
+        # collecting it mid-run, which is a hard crash rather than an
+        # exception. When a real thread is still unwinding,
+        # `_on_worker_thread_finished` releases it instead.
+        if worker is None or not worker.isRunning():
+            self._worker = None
 
     def _request_cancel(self):
-        if not self._is_running:
+        if not self._busy or self._worker is None:
             return
         self._cancel_requested = True
         self._worker.cancel()
@@ -131,7 +190,9 @@ class RunStateMixin:
         """`" [cancelled 120/349]"` after a cancel, else `""`.
 
         Appended to the name of a layer built from partial output, so a
-        half-finished result is never mistaken for a complete one.
+        half-finished result is never mistaken for a complete one. Stays
+        set until the next `_begin_run`; callers use it from inside a
+        finished handler.
         """
         if not self._cancel_requested:
             return ""
@@ -142,11 +203,19 @@ class RunStateMixin:
     def closeEvent(self, event):
         """Never let Qt destroy a running `QThread` — that is a hard crash,
         not an exception. A series run returns within one volume; a preview
-        may take its full duration, which is the cost of a single
-        uninterruptible call."""
-        worker = self._worker
-        if worker is not None:
+        is a single uninterruptible call, so this wait can be long."""
+        worker = getattr(self, "_worker", None)
+        if worker is not None and worker.isRunning():
             self._cancel_requested = True
             worker.cancel()
+            # Paint the explanation before blocking, or the wait is
+            # indistinguishable from a hang.
+            self._set_status("Waiting for the running job to finish…")
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents()
             worker.wait()
+        self._worker = None
+        self._busy = False
+        _release_process_run(self)
         super().closeEvent(event)

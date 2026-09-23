@@ -166,3 +166,47 @@ class TestRealThreading:
         qtbot.waitUntil(lambda: not widget._is_running, timeout=15000)
 
         assert widget._worker is None
+
+    def test_cancelling_a_real_preview_returns_the_widget_to_idle(
+        self, preproc, tmp_path, qtbot
+    ):
+        # A cancelled FunctionWorker3D deliberately emits neither
+        # run_finished nor errored, so teardown cannot hang off those:
+        # without a finished-driven path the widget stays busy forever and
+        # every later click is refused.
+        widget, viewer = preproc
+        in_dir = tmp_path / "in"
+        write_timepoint_folder(in_dir, n_timepoints=2, shape=(4, 16, 16))
+        _select_folder(widget, viewer, in_dir)
+
+        def _slow_blur(volume, **kwargs):
+            time.sleep(0.3)
+            return volume
+
+        widget._run_preview(_slow_blur, {}, "blur")
+        widget._cancel_btn.click()
+
+        qtbot.waitUntil(lambda: not widget._is_running, timeout=10000)
+        assert widget._blur_preview_btn.isEnabled()
+        assert widget._calc_run_btn.isEnabled()
+        assert not widget._cancel_btn.isEnabled()
+        assert widget._worker is None
+
+    def test_a_real_run_that_errors_returns_the_widget_to_idle(
+        self, preproc, tmp_path, qtbot
+    ):
+        widget, viewer = preproc
+        in_dir = tmp_path / "in"
+        write_timepoint_folder(in_dir, n_timepoints=3, shape=(4, 16, 16))
+        _select_folder(widget, viewer, in_dir)
+        widget._output_folder_edit.setText(str(tmp_path / "out"))
+
+        def _boom(volume, **kwargs):
+            raise RuntimeError("op exploded")
+
+        widget._run_op(_boom, {}, "calc")
+
+        qtbot.waitUntil(lambda: not widget._is_running, timeout=10000)
+        assert widget._calc_run_btn.isEnabled()
+        assert not widget._cancel_btn.isEnabled()
+

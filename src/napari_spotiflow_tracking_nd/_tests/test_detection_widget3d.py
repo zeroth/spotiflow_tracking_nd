@@ -589,3 +589,32 @@ class TestThreadedDetectionWiring:
     def test_the_blocking_note_is_gone(self, detection_widget):
         widget, _ = detection_widget
         assert not hasattr(widget, "_blocking_note")
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_preview_uses_the_parameters_as_of_the_click(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        # The spin boxes stay live during a run. Reading them inside the
+        # worker means a user who nudges prob_thresh while the model loads
+        # silently gets a preview computed at the new value and labelled as
+        # the one they asked for.
+        widget, viewer = detection_widget
+        # The layer/model helpers live on TestPreview.
+        TestPreview._setup(widget, viewer, tmp_path)
+        mock_load_model.return_value = TestPreview._mock_model()
+        widget._prob_thresh_spin.setValue(0.5)
+        widget._min_distance_spin.setValue(2)
+
+        def _launch(worker):
+            # The user fiddles after clicking Preview.
+            widget._prob_thresh_spin.setValue(0.9)
+            widget._min_distance_spin.setValue(9)
+            worker.run()
+
+        widget._launch_worker = _launch
+        widget._run_preview()
+
+        _args, kwargs = mock_load_model.return_value.predict.call_args
+        assert kwargs["prob_thresh"] == 0.5
+        assert kwargs["min_distance"] == 2
+

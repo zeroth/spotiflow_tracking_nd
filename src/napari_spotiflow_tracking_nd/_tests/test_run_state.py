@@ -166,3 +166,35 @@ class TestErrorPath:
         host.start(FakeWorker(fail_with="disk on fire"))
 
         assert host.finished_payloads == []
+
+
+class TestOneJobPerProcess:
+    """The spec says exactly one job runs at a time. Two widgets share one
+    GPU, so a pre-processing run and a detection run in flight together is
+    how a long run turns into a CUDA OOM that looks like a plugin bug."""
+
+    def test_a_second_widget_cannot_start_while_the_first_is_running(self, qtbot):
+        first, second = Host(), Host()
+        qtbot.addWidget(first)
+        qtbot.addWidget(second)
+        accepted = []
+
+        class Reentrant(FakeWorker):
+            def run(self):
+                # A different widget tries to start while this one runs.
+                accepted.append(second.start(FakeWorker()))
+                self.run_finished.emit("payload")
+
+        first.start(Reentrant())
+
+        assert accepted == [False], "the other widget's job should be refused"
+        assert second.launched == []
+
+    def test_the_other_widget_can_start_once_the_first_is_done(self, qtbot):
+        first, second = Host(), Host()
+        qtbot.addWidget(first)
+        qtbot.addWidget(second)
+
+        first.start(FakeWorker())
+        assert second.start(FakeWorker()) is True
+
