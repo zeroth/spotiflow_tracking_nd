@@ -72,9 +72,12 @@ class RunStateMixin:
         self._worker = worker
         self._cancel_requested = False
         self._last_progress = (0, total)
+        # Busy first, then the bar: resetting the bar emits `valueChanged`,
+        # and every such event during a run should see the buttons already
+        # in their busy state.
+        self._set_busy(True)
         self._progress_bar.setMaximum(max(total, 0))
         self._progress_bar.setValue(0)
-        self._set_busy(True)
         self._set_status(f"{description}…")
 
         # `FunctionWorker3D` has no `progress` — a single call has nothing
