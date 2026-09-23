@@ -29,6 +29,8 @@ whole-movie-in-RAM) version this plugin is ported from.
   / `prob_thresh` / `min_distance` against one volume, then commit to the
   full run. Repeated previews update a single layer rather than stacking
   one per click, and the detection model stays loaded between previews.
+  Previews run on a worker thread too, so the UI stays live while one is
+  in flight.
 - **Spot detection** — [Spotiflow](https://github.com/weigertlab/spotiflow)
   3D models, picked from a drop-down of the built-ins (`synth_3d`,
   `smfish_3d`) or set to a custom checkpoint folder (the drop-down is
@@ -37,13 +39,13 @@ whole-movie-in-RAM) version this plugin is ported from.
   CSV as a JSON sidecar (`spots.csv` → `spots.json`) and carried on the
   Points layer's metadata.
 
-> **A run blocks the napari window for its full duration.** Phase 1
-> deliberately runs each pre-processing / detection job synchronously
-> (`worker.run()`, not `worker.start()`), so napari stops repainting until
-> the last timepoint is written — on a large acquisition that can be many
-> minutes. It is working, not hung; watch the output folder (or the CSV)
-> growing. Background execution with a live progress bar and a working
-> Cancel button is Phase 2.
+> **Runs happen in the background.** Pre-processing and detection run on a
+> worker thread, so napari stays responsive: the progress bar shows
+> `120 / 349` as it goes, and **Cancel** stops the run after the volume
+> currently being processed. A cancelled run keeps everything already
+> written and loads it as a layer labelled `[cancelled 120/349]` —
+> nothing is discarded. A *preview* is a single uninterruptible call, so
+> cancelling one discards its result rather than stopping the work.
 
 Deferred to later phases: tracking (trackpy, 3D), track-property/step
 analysis, PAPA (not planned), N2V denoise, walking average, erosion
