@@ -23,6 +23,11 @@ from qtpy.QtWidgets import (
 )
 
 from napari_spotiflow_tracking_nd._io3d import read_volume
+from napari_spotiflow_tracking_nd._fitting3d import (
+    DEFAULT_PATCH_RADIUS_ZYX,
+    fit_spots_3d,
+    paint_label_mask,
+)
 from napari_spotiflow_tracking_nd._preprocessing3d import _get_device
 from napari_spotiflow_tracking_nd._segmentation3d import (
     PRETRAINED_3D_MODELS,
@@ -109,6 +114,46 @@ class DetectionWidget3D(RunStateMixin, QWidget):
         params_layout.addWidget(self._min_distance_spin)
         layout.addWidget(params_group)
 
+        fit_group = QGroupBox("Gaussian fit")
+        fit_layout = QVBoxLayout()
+        fit_group.setLayout(fit_layout)
+
+        fit_row = QHBoxLayout()
+        self._fit_check = QCheckBox("Fit Gaussians to spots")
+        self._fit_check.setToolTip(
+            "Adds each spot's size, brightness and local background to the "
+            "CSV. Costs roughly 12 ms per spot, so a dense series takes tens "
+            "of minutes — leave it off while tuning the threshold."
+        )
+        fit_row.addWidget(self._fit_check)
+        fit_row.addWidget(QLabel("patch radius z:"))
+        self._patch_radius_z_spin = QSpinBox()
+        self._patch_radius_z_spin.setRange(1, 30)
+        self._patch_radius_z_spin.setValue(DEFAULT_PATCH_RADIUS_ZYX[0])
+        fit_row.addWidget(self._patch_radius_z_spin)
+        fit_row.addWidget(QLabel("xy:"))
+        self._patch_radius_xy_spin = QSpinBox()
+        self._patch_radius_xy_spin.setRange(1, 30)
+        self._patch_radius_xy_spin.setValue(DEFAULT_PATCH_RADIUS_ZYX[1])
+        fit_row.addWidget(self._patch_radius_xy_spin)
+        fit_layout.addLayout(fit_row)
+
+        mask_row = QHBoxLayout()
+        self._export_masks_check = QCheckBox("Export label masks to:")
+        self._export_masks_check.setToolTip(
+            "One uint16 label volume per timepoint — the same size as the "
+            "input, so a long series is large. The masks are reconstructible "
+            "from the CSV's fit columns, so this is off by default."
+        )
+        mask_row.addWidget(self._export_masks_check)
+        self._mask_folder_edit = QLineEdit()
+        mask_row.addWidget(self._mask_folder_edit)
+        mask_browse_btn = QPushButton("Browse…")
+        mask_browse_btn.clicked.connect(self._browse_mask_folder)
+        mask_row.addWidget(mask_browse_btn)
+        fit_layout.addLayout(mask_row)
+        layout.addWidget(fit_group)
+
         out_group = QGroupBox("Output")
         out_layout = QHBoxLayout()
         out_group.setLayout(out_layout)
@@ -172,6 +217,11 @@ class DetectionWidget3D(RunStateMixin, QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Select model checkpoint folder")
         if folder:
             self._model_combo.setCurrentText(folder)
+
+    def _browse_mask_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select mask output folder")
+        if folder:
+            self._mask_folder_edit.setText(folder)
 
     def _browse_csv_path(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save spots CSV", "", "CSV files (*.csv)")
@@ -240,25 +290,31 @@ class DetectionWidget3D(RunStateMixin, QWidget):
         # meanwhile — labelled as the one they asked for.
         prob_thresh = self._prob_thresh_spin.value()
         min_distance = self._min_distance_spin.value()
+        do_fit = self._fit_check.isChecked()
+        patch_radius_zyx = (
+            self._patch_radius_z_spin.value(),
+            self._patch_radius_xy_spin.value(),
+            self._patch_radius_xy_spin.value(),
+        )
         load_the_model = self._model_loader(model_name, device)
 
         def _detect():
-            # Both the model load and the detection happen on the worker
-            # thread; the cache is safe unlocked because only one job runs
-            # at a time.
             model = load_the_model()
             volume = read_volume(files[t])
             points, _details = detect_spots_3d(
-                volume,
-                model,
+                volume, model,
                 prob_thresh=prob_thresh,
                 min_distance=min_distance,
             )
-            return points
+            if not do_fit:
+                return points, None
+            fits = fit_spots_3d(volume, points, patch_radius_zyx=patch_radius_zyx)
+            return points, paint_label_mask(volume.shape, fits)
 
         worker = FunctionWorker3D(_detect)
 
-        def _on_finished(points):
+        def _on_finished(result):
+            points, mask = result
             # One preview layer, updated in place: tuning means clicking
             # this repeatedly, and a layer per click would bury the viewer.
             preview_name = f"{layer.name} (spot preview)"
@@ -278,6 +334,17 @@ class DetectionWidget3D(RunStateMixin, QWidget):
                 f"Preview: {len(points)} spots on timepoint {t} "
                 "(nothing written to disk)."
             )
+
+            if mask is not None:
+                # One preview mask layer, updated in place, for the
+                # same reason as the points layer above.
+                mask_name = f"{layer.name} (spot mask preview)"
+                if mask_name in self.viewer.layers:
+                    self.viewer.layers[mask_name].data = mask
+                else:
+                    self.viewer.add_labels(
+                        mask, name=mask_name, scale=layer.scale[1:]
+                    )
 
         self._begin_run(
             worker, total=1, description=f"Previewing detection on timepoint {t}",
@@ -302,6 +369,19 @@ class DetectionWidget3D(RunStateMixin, QWidget):
             show_error("No output CSV path selected.")
             return
 
+        patch_radius_zyx = (
+            self._patch_radius_z_spin.value(),
+            self._patch_radius_xy_spin.value(),
+            self._patch_radius_xy_spin.value(),
+        )
+        mask_output_dir = None
+        if self._export_masks_check.isChecked():
+            folder = self._mask_folder_edit.text()
+            if not folder:
+                show_error("Mask export is on but no mask folder is selected.")
+                return
+            mask_output_dir = Path(folder)
+
         # `_get_device` falls back to "cpu" when CUDA isn't actually
         # available, instead of erroring deep inside Spotiflow.
         device = _get_device(use_gpu=self._use_gpu_check.isChecked())
@@ -317,6 +397,9 @@ class DetectionWidget3D(RunStateMixin, QWidget):
             csv_path=Path(csv_path),
             prob_thresh=self._prob_thresh_spin.value(),
             min_distance=self._min_distance_spin.value(),
+            fit=self._fit_check.isChecked(),
+            patch_radius_zyx=patch_radius_zyx,
+            mask_output_dir=mask_output_dir,
         )
 
         def _on_finished(written_csv_path):

@@ -618,3 +618,94 @@ class TestThreadedDetectionWiring:
         assert kwargs["prob_thresh"] == 0.5
         assert kwargs["min_distance"] == 2
 
+
+class TestFitControls:
+    def test_has_the_fitting_controls(self, detection_widget):
+        widget, _ = detection_widget
+        for attr in (
+            "_fit_check", "_patch_radius_z_spin", "_patch_radius_xy_spin",
+            "_export_masks_check", "_mask_folder_edit",
+        ):
+            assert hasattr(widget, attr), f"missing {attr}"
+
+    def test_fitting_is_off_by_default(self, detection_widget):
+        # It costs ~28 min on the reference deconvolved series; tuning runs
+        # should not pay that unasked.
+        widget, _ = detection_widget
+        assert not widget._fit_check.isChecked()
+        assert not widget._export_masks_check.isChecked()
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_the_run_passes_the_fit_settings_to_the_worker(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        TestPreview._setup(widget, viewer, tmp_path)
+        mock_load_model.return_value = TestPreview._mock_model()
+        widget._csv_path_edit.setText(str(tmp_path / "spots.csv"))
+        widget._fit_check.setChecked(True)
+        widget._patch_radius_z_spin.setValue(4)
+        widget._patch_radius_xy_spin.setValue(6)
+        widget._export_masks_check.setChecked(True)
+        widget._mask_folder_edit.setText(str(tmp_path / "masks"))
+
+        captured = {}
+
+        def _launch(worker):
+            captured["fit"] = worker._fit
+            captured["radius"] = worker._patch_radius_zyx
+            captured["mask_dir"] = worker._mask_output_dir
+            worker.run()
+
+        widget._launch_worker = _launch
+        widget._run_detection()
+
+        assert captured["fit"] is True
+        assert captured["radius"] == (4, 6, 6)
+        assert captured["mask_dir"] == tmp_path / "masks"
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_exporting_masks_without_a_folder_is_refused(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        TestPreview._setup(widget, viewer, tmp_path)
+        mock_load_model.return_value = TestPreview._mock_model()
+        widget._csv_path_edit.setText(str(tmp_path / "spots.csv"))
+        widget._fit_check.setChecked(True)
+        widget._export_masks_check.setChecked(True)  # but no folder
+
+        with patch(
+            "napari_spotiflow_tracking_nd._detection_widget3d.show_error"
+        ) as mock_show_error:
+            widget._run_detection()
+
+        assert mock_show_error.called
+        assert not (tmp_path / "spots.csv").exists()
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_preview_with_fitting_adds_a_labels_layer(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        TestPreview._setup(widget, viewer, tmp_path)
+        mock_load_model.return_value = TestPreview._mock_model()
+        widget._fit_check.setChecked(True)
+
+        widget._run_preview()
+
+        labels = [l for l in viewer.layers if l.__class__.__name__ == "Labels"]
+        assert len(labels) == 1
+        assert labels[0].name == "vol (spot mask preview)"
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_preview_without_fitting_adds_no_labels_layer(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        TestPreview._setup(widget, viewer, tmp_path)
+        mock_load_model.return_value = TestPreview._mock_model()
+
+        widget._run_preview()
+
+        assert [l for l in viewer.layers if l.__class__.__name__ == "Labels"] == []
