@@ -330,3 +330,116 @@ class TestDetectionWorkerLazyModel:
 
         assert errors == ["no such checkpoint"]
         assert not (tmp_path / "spots.csv").exists()
+
+
+class TestDetectionWorkerFitting:
+    @staticmethod
+    def _model(n_spots=2):
+        model = MagicMock()
+        details = MagicMock()
+        details.prob = np.array([0.9, 0.7][:n_spots])
+        model.predict.return_value = (
+            np.array([[4.0, 8.0, 8.0], [4.0, 20.0, 20.0]][:n_spots]), details,
+        )
+        return model
+
+    @staticmethod
+    def _folder(tmp_path, n_timepoints=2):
+        return write_timepoint_folder(
+            tmp_path / "in", n_timepoints=n_timepoints, shape=(12, 32, 32),
+        )
+
+    def test_fitting_off_leaves_the_csv_columns_unchanged(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
+
+        files = self._folder(tmp_path)
+        worker = DetectionWorker3D(
+            files=files, model=self._model(), csv_path=tmp_path / "spots.csv",
+        )
+        worker.run()
+
+        df = pd.read_csv(tmp_path / "spots.csv")
+        assert list(df.columns) == ["frame", "z", "y", "x", "prob"]
+
+    def test_fitting_on_adds_exactly_the_named_columns(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
+
+        files = self._folder(tmp_path)
+        worker = DetectionWorker3D(
+            files=files, model=self._model(), csv_path=tmp_path / "spots.csv",
+            fit=True, max_workers=1,
+        )
+        worker.run()
+
+        df = pd.read_csv(tmp_path / "spots.csv")
+        assert list(df.columns) == [
+            "frame", "z", "y", "x", "prob",
+            "fit_z", "fit_y", "fit_x",
+            "sigma_z", "sigma_y", "sigma_x",
+            "amplitude", "background", "integrated_intensity", "converged",
+        ]
+
+    def test_the_detected_coordinates_are_not_replaced_by_the_fitted_ones(self, tmp_path):
+        # Phase 2 tracking reads z/y/x; turning fitting on must not shift
+        # them underneath it.
+        from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
+
+        files = self._folder(tmp_path)
+        worker = DetectionWorker3D(
+            files=files, model=self._model(n_spots=1), csv_path=tmp_path / "spots.csv",
+            fit=True, max_workers=1,
+        )
+        worker.run()
+
+        df = pd.read_csv(tmp_path / "spots.csv")
+        assert df["z"].iloc[0] == 4.0
+        assert df["y"].iloc[0] == 8.0
+        assert df["x"].iloc[0] == 8.0
+
+    def test_no_mask_is_written_unless_a_folder_is_given(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
+
+        files = self._folder(tmp_path)
+        worker = DetectionWorker3D(
+            files=files, model=self._model(), csv_path=tmp_path / "spots.csv",
+            fit=True, max_workers=1,
+        )
+        worker.run()
+
+        assert not list(tmp_path.glob("**/*mask*"))
+
+    def test_a_mask_folder_gets_one_label_tiff_per_timepoint(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
+
+        files = self._folder(tmp_path, n_timepoints=3)
+        mask_dir = tmp_path / "masks"
+        worker = DetectionWorker3D(
+            files=files, model=self._model(), csv_path=tmp_path / "spots.csv",
+            fit=True, mask_output_dir=mask_dir, max_workers=1,
+        )
+        worker.run()
+
+        written = sorted(p.name for p in mask_dir.iterdir())
+        assert written == [f.name for f in files]
+        mask = tifffile.imread(str(mask_dir / files[0].name))
+        assert mask.shape == (12, 32, 32)
+        assert mask.max() == 2  # two spots, labels 1 and 2
+
+    def test_a_timepoint_with_no_spots_writes_no_rows_and_still_masks(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
+
+        files = self._folder(tmp_path, n_timepoints=1)
+        model = MagicMock()
+        empty = MagicMock()
+        empty.prob = np.empty((0,))
+        model.predict.return_value = (np.empty((0, 3)), empty)
+        mask_dir = tmp_path / "masks"
+
+        worker = DetectionWorker3D(
+            files=files, model=model, csv_path=tmp_path / "spots.csv",
+            fit=True, mask_output_dir=mask_dir, max_workers=1,
+        )
+        worker.run()  # must not raise
+
+        assert not (tmp_path / "spots.csv").exists()
+        assert tifffile.imread(str(mask_dir / files[0].name)).max() == 0

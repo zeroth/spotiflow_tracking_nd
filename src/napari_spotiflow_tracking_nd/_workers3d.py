@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -7,6 +8,12 @@ import pandas as pd
 import tifffile
 from qtpy.QtCore import QThread, Signal
 
+from napari_spotiflow_tracking_nd._fitting3d import (
+    DEFAULT_N_SIGMA,
+    DEFAULT_PATCH_RADIUS_ZYX,
+    fit_spots_3d,
+    paint_label_mask,
+)
 from napari_spotiflow_tracking_nd._segmentation3d import detect_spots_3d
 
 
@@ -76,6 +83,10 @@ class DetectionWorker3D(QThread):
         csv_path: Path,
         prob_thresh: float | None = 0.5,
         min_distance: int = 2,
+        fit: bool = False,
+        patch_radius_zyx=DEFAULT_PATCH_RADIUS_ZYX,
+        mask_output_dir: Path | None = None,
+        max_workers: int | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -84,6 +95,10 @@ class DetectionWorker3D(QThread):
         self._csv_path = Path(csv_path)
         self._prob_thresh = prob_thresh
         self._min_distance = min_distance
+        self._fit = fit
+        self._patch_radius_zyx = tuple(patch_radius_zyx)
+        self._mask_output_dir = Path(mask_output_dir) if mask_output_dir else None
+        self._max_workers = max_workers
         self._cancelled = False
 
     def cancel(self):
@@ -99,51 +114,101 @@ class DetectionWorker3D(QThread):
                 self._model = self._model()
             if self._csv_path.exists():
                 self._csv_path.unlink()
-            header_written = False
-            total = len(self._files)
-            for t, path in enumerate(self._files):
-                if self._cancelled:
-                    break
-                volume = tifffile.imread(str(path))
-                points, details = detect_spots_3d(
-                    volume, self._model,
-                    prob_thresh=self._prob_thresh,
-                    min_distance=self._min_distance,
-                )
-                if len(points) > 0:
-                    coords = np.asarray(points)
-                    # Built column-by-column, not as one `np.hstack` block:
-                    # hstacking the integer frame index with float coords
-                    # and probabilities promotes everything to float64, and
-                    # the CSV's `frame` column comes out as `0.0, 1.0, ...`.
-                    df = pd.DataFrame(
-                        {
-                            "frame": np.full(len(coords), t, dtype=np.int64),
-                            "z": coords[:, 0],
-                            "y": coords[:, 1],
-                            "x": coords[:, 2],
-                            "prob": np.asarray(details.prob).reshape(-1),
-                        }
-                    )
-                    df.to_csv(self._csv_path, mode="a", header=not header_written, index=False)
-                    header_written = True
-                self.progress.emit(t + 1, total)
+            if self._mask_output_dir is not None:
+                self._mask_output_dir.mkdir(parents=True, exist_ok=True)
+
+            # One pool for the whole run: Windows spawns rather than forks,
+            # so a pool per timepoint would spend ~0.5-1 s per process
+            # starting up, 349 times over.
+            pool = None
+            if self._fit and self._max_workers != 1:
+                pool = ProcessPoolExecutor(max_workers=self._max_workers)
+            try:
+                self._detect_all(pool)
+            finally:
+                if pool is not None:
+                    pool.shutdown(wait=True)
             self.run_finished.emit(str(self._csv_path))
         except Exception as exc:
             self.errored.emit(str(exc))
+
+    def _detect_all(self, pool):
+        header_written = False
+        total = len(self._files)
+        for t, path in enumerate(self._files):
+            if self._cancelled:
+                break
+            volume = tifffile.imread(str(path))
+            points, details = detect_spots_3d(
+                volume, self._model,
+                prob_thresh=self._prob_thresh,
+                min_distance=self._min_distance,
+            )
+
+            fits = None
+            if self._fit:
+                fits = fit_spots_3d(
+                    volume, points,
+                    patch_radius_zyx=self._patch_radius_zyx,
+                    pool=pool,
+                )
+
+            if len(points) > 0:
+                df = self._rows_for(t, points, details, fits)
+                df.to_csv(self._csv_path, mode="a", header=not header_written, index=False)
+                header_written = True
+
+            if self._mask_output_dir is not None:
+                # Written even for a timepoint with no spots, so the mask
+                # series stays aligned 1:1 with the input series.
+                mask = paint_label_mask(volume.shape, fits or [], n_sigma=DEFAULT_N_SIGMA)
+                tifffile.imwrite(str(self._mask_output_dir / path.name), mask)
+
+            self.progress.emit(t + 1, total)
+
+    @staticmethod
+    def _rows_for(t, points, details, fits):
+        coords = np.asarray(points)
+        # Built column-by-column, not as one `np.hstack` block: hstacking
+        # the integer frame index with float coords and probabilities
+        # promotes everything to float64, and the CSV's `frame` column
+        # comes out as `0.0, 1.0, ...`.
+        columns = {
+            "frame": np.full(len(coords), t, dtype=np.int64),
+            "z": coords[:, 0],
+            "y": coords[:, 1],
+            "x": coords[:, 2],
+            "prob": np.asarray(details.prob).reshape(-1),
+        }
+        if fits is not None:
+            # `z, y, x` stay as detected; the refined centre is separate,
+            # so nothing downstream shifts when fitting is turned on.
+            columns.update(
+                fit_z=np.array([f.z0 for f in fits]),
+                fit_y=np.array([f.y0 for f in fits]),
+                fit_x=np.array([f.x0 for f in fits]),
+                sigma_z=np.array([f.sigma_z for f in fits]),
+                sigma_y=np.array([f.sigma_y for f in fits]),
+                sigma_x=np.array([f.sigma_x for f in fits]),
+                amplitude=np.array([f.amplitude for f in fits]),
+                background=np.array([f.background for f in fits]),
+                integrated_intensity=np.array([f.integrated_intensity for f in fits]),
+                converged=np.array([f.converged for f in fits]),
+            )
+        return pd.DataFrame(columns)
 
 
 class FunctionWorker3D(QThread):
     """Run one callable on a background thread and hand back its result.
 
     The two streaming workers above own a loop and can stop between
-    iterations. This one carries a single blocking call — a preview of one
-    volume — so `cancel()` cannot interrupt it. Cancelling only suppresses
+    iterations. This one carries a single blocking call â€” a preview of one
+    volume â€” so `cancel()` cannot interrupt it. Cancelling only suppresses
     the result; the thread still runs to completion in the background.
     """
 
     run_finished = Signal(object)  # whatever `fn` returned
-    # `run_finished`, not `finished` — see `VolumeOpWorker3D` for why.
+    # `run_finished`, not `finished` â€” see `VolumeOpWorker3D` for why.
     errored = Signal(str)
 
     def __init__(self, fn, args=(), kwargs=None, parent=None):
