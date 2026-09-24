@@ -38,6 +38,24 @@ whole-movie-in-RAM) version this plugin is ported from.
   (`frame, z, y, x, prob`) and loaded back as a Points layer. The calibration in force for the run is written beside the
   CSV as a JSON sidecar (`spots.csv` → `spots.json`) and carried on the
   Points layer's metadata.
+- **Gaussian fitting (optional)** — fits a 3D Gaussian to each detected
+  spot and adds its refined centre, per-axis σ, amplitude, local
+  background and analytic integrated intensity to the spots CSV. Roughly
+  12 ms per spot, parallelised across processes: about 28 minutes for a
+  dense 349-timepoint series, so it is off by default and the threshold
+  tuning you do with **Preview** stays fast. `z, y, x` remain exactly as
+  detected — the fit's centre is added as `fit_z, fit_y, fit_x`, so
+  turning fitting on never moves coordinates under anything downstream.
+  A spot whose fit fails, or which sits too close to a volume edge to cut
+  a full patch, keeps its row with `converged=False` and a fallback σ
+  rather than disappearing.
+- **Label masks (optional)** — each fitted spot painted as an ellipsoid
+  out to 2σ, one label per spot. Shown as a Labels layer when you
+  **Preview** with fitting on; written to disk as one label TIFF per
+  timepoint only when you ask, because a label volume is the same size as
+  the data (a 349-timepoint series is ~113 GB). The masks are
+  reconstructible from the CSV's fit columns, which is why the parameters
+  are what's always saved.
 
 > **Runs happen in the background.** Pre-processing and detection run on a
 > worker thread, so napari stays responsive: the progress bar shows
