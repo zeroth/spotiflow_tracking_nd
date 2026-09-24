@@ -156,3 +156,50 @@ class TestComputeLayerScale:
         assert compute_layer_scale(None, None) == (1.0, 1.0, 1.0, 1.0)
         assert compute_layer_scale(0.104, None) == (1.0, 1.0, 1.0, 1.0)
         assert compute_layer_scale(None, 0.210) == (1.0, 1.0, 1.0, 1.0)
+
+
+class TestValidateOutputDir:
+    """Shared by both widgets: every writer in this plugin writes
+    `output_dir / input_file.name`, so an output folder that is the input
+    folder overwrites the source acquisition in place.
+    """
+
+    def test_an_empty_folder_is_refused(self):
+        from napari_spotiflow_tracking_nd._io3d import validate_output_dir
+
+        out, error = validate_output_dir("", None)
+
+        assert out is None
+        assert error
+
+    def test_the_input_folder_is_refused(self, tmp_path):
+        from napari_spotiflow_tracking_nd._io3d import validate_output_dir
+
+        files = write_timepoint_folder(tmp_path / "in", n_timepoints=2)
+
+        out, error = validate_output_dir(str(tmp_path / "in"), files)
+
+        assert out is None
+        assert "input folder" in error
+
+    def test_a_different_folder_is_accepted(self, tmp_path):
+        from napari_spotiflow_tracking_nd._io3d import validate_output_dir
+
+        files = write_timepoint_folder(tmp_path / "in", n_timepoints=2)
+
+        out, error = validate_output_dir(str(tmp_path / "out"), files)
+
+        assert error is None
+        assert out == (tmp_path / "out").resolve()
+
+    def test_the_input_folder_spelled_differently_is_still_refused(self, tmp_path):
+        # `Browse…` and a typed path can disagree on separators and on
+        # `.`; resolving both is what makes the guard hold.
+        from napari_spotiflow_tracking_nd._io3d import validate_output_dir
+
+        files = write_timepoint_folder(tmp_path / "in", n_timepoints=2)
+
+        out, error = validate_output_dir(str(tmp_path / "in" / "."), files)
+
+        assert out is None
+        assert "input folder" in error

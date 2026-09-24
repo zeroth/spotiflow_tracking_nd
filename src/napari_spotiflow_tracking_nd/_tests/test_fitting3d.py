@@ -102,7 +102,10 @@ class TestFailureAndFallback:
         assert len(fits) == 1, "a failed fit must not drop the spot"
         assert not fits[0].converged
         assert fits[0].sigma_z > 0 and fits[0].sigma_y > 0 and fits[0].sigma_x > 0
-        assert np.isfinite(fits[0].integrated_intensity)
+        # NaN, not a finite number: nothing here was measured, and a
+        # finite value would average into a real distribution. What must
+        # not happen is an exception or an inf from a zero sigma.
+        assert np.isnan(fits[0].integrated_intensity)
 
     def test_a_spot_too_close_to_an_edge_is_not_fitted_but_is_kept(self):
         from napari_spotiflow_tracking_nd._fitting3d import (
@@ -309,3 +312,130 @@ class TestPaintLabelMask:
 
         assert mask.dtype == np.uint32
         assert mask.max() == n
+
+
+class TestNonConvergedRowsAreNotMeasurements:
+    """A failed fit must not report a number that reads like a measurement.
+
+    `_fallback` used to take `amplitude = patch.max() - patch.min()`, which
+    on a crowded patch is a *neighbouring* spot's brightness: the failed
+    row then carried an `integrated_intensity` larger than a real spot's,
+    so anyone plotting the column without filtering on `converged` got the
+    failures sitting at the top of the distribution.
+    """
+
+    def test_a_failed_fit_reports_nan_intensity_not_a_patch_statistic(self):
+        from napari_spotiflow_tracking_nd._fitting3d import (
+            DEFAULT_FALLBACK_RADIUS_ZYX, DEFAULT_PATCH_RADIUS_ZYX, fit_patch,
+        )
+
+        # Flat except for one very bright corner voxel: the centre spot
+        # cannot be fitted, but the patch's range is huge.
+        patch = np.full((7, 11, 11), 100.0)
+        patch[0, 0, 0] = 20000.0
+
+        fit = fit_patch(
+            patch, (10.0, 20.0, 20.0),
+            DEFAULT_PATCH_RADIUS_ZYX, DEFAULT_FALLBACK_RADIUS_ZYX,
+        )
+
+        assert not fit.converged
+        assert np.isnan(fit.amplitude)
+        assert np.isnan(fit.background)
+        assert np.isnan(fit.integrated_intensity)
+
+    def test_an_edge_spot_also_reports_nan_rather_than_zero(self):
+        # Zero is a number someone can average; NaN is not. An edge spot
+        # was never measured at all, so it must say so the same way.
+        from napari_spotiflow_tracking_nd._fitting3d import fit_spots_3d
+
+        volume = np.full((8, 16, 16), 100.0)
+
+        fits = fit_spots_3d(volume, np.array([[0.0, 0.0, 0.0]]))
+
+        assert not fits[0].converged
+        assert np.isnan(fits[0].amplitude)
+        assert np.isnan(fits[0].integrated_intensity)
+        assert fits[0].sigma_z > 0, "sigma must stay usable — the mask needs it"
+
+    def test_a_fit_that_migrates_onto_a_brighter_neighbour_is_rejected(self):
+        # curve_fit is unbounded, so with a bright spot 4 voxels away the
+        # fit slides off this spot and onto that one, then reports the
+        # neighbour's amplitude under this spot's identity.
+        from napari_spotiflow_tracking_nd._fitting3d import fit_spots_3d
+
+        rng = np.random.default_rng(0)
+        volume = np.full((21, 41, 41), 100.0)
+        zz, yy, xx = np.ogrid[:21, :41, :41]
+        for (cy, amp) in ((20, 300.0), (24, 6000.0)):
+            volume += amp * np.exp(
+                -((zz - 10) ** 2 / 2.88 + (yy - cy) ** 2 / 8.0 + (xx - 20) ** 2 / 8.0)
+            )
+        volume += rng.normal(0, 5, volume.shape)
+
+        dim = fit_spots_3d(volume, np.array([[10.0, 20.0, 20.0]]))[0]
+
+        assert not dim.converged, "the fit migrated onto the neighbour"
+
+    def test_a_genuine_spot_still_converges_after_the_centre_is_capped(self):
+        from napari_spotiflow_tracking_nd._fitting3d import fit_spots_3d
+
+        rng = np.random.default_rng(1)
+        volume = np.full((21, 41, 41), 100.0)
+        zz, yy, xx = np.ogrid[:21, :41, :41]
+        volume += 1500.0 * np.exp(
+            -((zz - 10.4) ** 2 / 2.88 + (yy - 20.3) ** 2 / 8.0 + (xx - 19.6) ** 2 / 8.0)
+        )
+        volume += rng.normal(0, 5, volume.shape)
+
+        # Detection one voxel off, as Spotiflow's rounded centre can be.
+        fit = fit_spots_3d(volume, np.array([[11.0, 20.0, 19.0]]))[0]
+
+        assert fit.converged
+        assert abs(fit.amplitude - 1500.0) < 200.0
+
+
+class TestSigmaSanitisationIsGuarded:
+    """Regression guards for Review Focus #1, which the original tests
+    named but did not exercise: both passed whether or not the
+    sanitisation existed.
+    """
+
+    def test_a_negative_sigma_from_curve_fit_is_made_positive(self, monkeypatch):
+        from napari_spotiflow_tracking_nd import _fitting3d as F
+
+        # The model is even in sigma, so curve_fit can legitimately return
+        # the negative branch. Force it to.
+        def fake_curve_fit(*args, **kwargs):
+            return np.array([0.1, 0.1, 0.1, -1.2, -2.0, -2.0, 800.0, 100.0]), None
+
+        monkeypatch.setattr(F, "curve_fit", fake_curve_fit)
+
+        patch = np.full((7, 11, 11), 100.0)
+        patch[3, 5, 5] = 900.0
+        fit = F.fit_patch(
+            patch, (10.0, 20.0, 20.0),
+            F.DEFAULT_PATCH_RADIUS_ZYX, F.DEFAULT_FALLBACK_RADIUS_ZYX,
+        )
+
+        assert fit.converged
+        assert fit.sigma_z > 0 and fit.sigma_y > 0 and fit.sigma_x > 0
+        assert fit.integrated_intensity > 0
+
+    def test_a_sigma_wider_than_the_patch_is_rejected(self, monkeypatch):
+        from napari_spotiflow_tracking_nd import _fitting3d as F
+
+        def fake_curve_fit(*args, **kwargs):
+            return np.array([0.0, 0.0, 0.0, 99.0, 99.0, 99.0, 800.0, 100.0]), None
+
+        monkeypatch.setattr(F, "curve_fit", fake_curve_fit)
+
+        patch = np.full((7, 11, 11), 100.0)
+        patch[3, 5, 5] = 900.0
+        fit = F.fit_patch(
+            patch, (10.0, 20.0, 20.0),
+            F.DEFAULT_PATCH_RADIUS_ZYX, F.DEFAULT_FALLBACK_RADIUS_ZYX,
+        )
+
+        assert not fit.converged
+        assert fit.sigma_z <= F.DEFAULT_FALLBACK_RADIUS_ZYX[0]

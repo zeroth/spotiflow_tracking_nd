@@ -139,3 +139,36 @@ def compute_layer_scale(
     if pixel_size_xy_um is None or voxel_size_z_um is None:
         return (1.0, 1.0, 1.0, 1.0)
     return (1.0, float(voxel_size_z_um), float(pixel_size_xy_um), float(pixel_size_xy_um))
+
+
+def validate_output_dir(folder, src_files) -> tuple[Path | None, str | None]:
+    """Check an output folder, returning `(path, None)` or `(None, error)`.
+
+    Every writer in this plugin — pre-processing, and the detection pass's
+    label masks — writes `output_dir / input_file.name`, mirroring the
+    input filenames exactly. An output folder that *is* the input folder
+    would therefore overwrite the source acquisition in place, file by
+    file, with no confirmation and no undo. The folder pickers are
+    adjacent `Browse…` dialogs, so that slip is a plausible one.
+
+    No Qt here: the caller turns the message into `show_error`.
+    """
+    if not folder:
+        return None, "No output folder selected."
+
+    try:
+        out = Path(folder).resolve()
+    except OSError as exc:
+        return None, str(exc)
+
+    if src_files:
+        try:
+            src_dir = Path(src_files[0]).resolve().parent
+        except OSError:
+            src_dir = None
+        if src_dir is not None and out == src_dir:
+            return None, (
+                "Output folder is the input folder — pick a different one "
+                "to avoid overwriting your source data."
+            )
+    return out, None

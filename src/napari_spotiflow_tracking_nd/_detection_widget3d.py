@@ -22,7 +22,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from napari_spotiflow_tracking_nd._io3d import read_volume
+from napari_spotiflow_tracking_nd._io3d import read_volume, validate_output_dir
 from napari_spotiflow_tracking_nd._fitting3d import (
     DEFAULT_PATCH_RADIUS_ZYX,
     fit_spots_3d,
@@ -335,16 +335,18 @@ class DetectionWidget3D(RunStateMixin, QWidget):
                 "(nothing written to disk)."
             )
 
-            if mask is not None:
-                # One preview mask layer, updated in place, for the
-                # same reason as the points layer above.
-                mask_name = f"{layer.name} (spot mask preview)"
+            # One preview mask layer, updated in place, for the same
+            # reason as the points layer above — and removed when this
+            # preview has no mask, so a stale mask from an earlier
+            # threshold never sits beside freshly-detected points.
+            mask_name = f"{layer.name} (spot mask preview)"
+            if mask is None:
                 if mask_name in self.viewer.layers:
-                    self.viewer.layers[mask_name].data = mask
-                else:
-                    self.viewer.add_labels(
-                        mask, name=mask_name, scale=layer.scale[1:]
-                    )
+                    self.viewer.layers.remove(mask_name)
+            elif mask_name in self.viewer.layers:
+                self.viewer.layers[mask_name].data = mask
+            else:
+                self.viewer.add_labels(mask, name=mask_name, scale=layer.scale[1:])
 
         self._begin_run(
             worker, total=1, description=f"Previewing detection on timepoint {t}",
@@ -376,11 +378,26 @@ class DetectionWidget3D(RunStateMixin, QWidget):
         )
         mask_output_dir = None
         if self._export_masks_check.isChecked():
-            folder = self._mask_folder_edit.text()
-            if not folder:
+            if not self._fit_check.isChecked():
+                # The masks are painted from the fits; without them the
+                # run would write one full-size empty volume per
+                # timepoint and say nothing.
+                show_error(
+                    "Label-mask export needs 'Fit Gaussians to spots' "
+                    "turned on — the masks are painted from the fits."
+                )
+                return
+            if not self._mask_folder_edit.text():
                 show_error("Mask export is on but no mask folder is selected.")
                 return
-            mask_output_dir = Path(folder)
+            # Masks are written as `folder / input_file.name`, so the same
+            # overwrite-your-source guard as pre-processing applies.
+            mask_output_dir, error = validate_output_dir(
+                self._mask_folder_edit.text(), files,
+            )
+            if error is not None:
+                show_error(error)
+                return
 
         # `_get_device` falls back to "cpu" when CUDA isn't actually
         # available, instead of erroring deep inside Spotiflow.

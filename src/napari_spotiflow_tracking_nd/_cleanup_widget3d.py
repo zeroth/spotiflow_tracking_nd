@@ -24,6 +24,7 @@ from napari_spotiflow_tracking_nd._io3d import (
     build_lazy_stack_from_files,
     compute_layer_scale,
     read_volume,
+    validate_output_dir,
 )
 from napari_spotiflow_tracking_nd._preprocessing3d import (
     _get_device,
@@ -251,36 +252,14 @@ class PreProcessingWidget3D(RunStateMixin, QWidget):
     def _get_output_dir(self, layer=None) -> Path | None:
         """The validated output directory, or None (after `show_error`).
 
-        `VolumeOpWorker3D` writes `output_dir / path.name`, mirroring the
-        input filenames exactly, so an output folder that *is* the input
-        folder would overwrite the source acquisition in place, file by
-        file, with no confirmation and no undo. Both folder pickers are
-        adjacent `Browse…` dialogs, so that slip is a plausible one; it is
-        refused here, before any worker is constructed.
+        The rule — and why it exists — lives in `_io3d.validate_output_dir`,
+        shared with the detection widget's mask folder.
         """
-        folder = self._output_folder_edit.text()
-        if not folder:
-            show_error("No output folder selected.")
-            return None
-
-        try:
-            out = Path(folder).resolve()
-        except OSError as exc:
-            show_error(str(exc))
-            return None
-
         src_files = layer.metadata.get("source_files") if layer is not None else None
-        if src_files:
-            try:
-                src_dir = Path(src_files[0]).resolve().parent
-            except OSError:
-                src_dir = None
-            if src_dir is not None and out == src_dir:
-                show_error(
-                    "Output folder is the input folder — pick a different one "
-                    "to avoid overwriting your source data."
-                )
-                return None
+        out, error = validate_output_dir(self._output_folder_edit.text(), src_files)
+        if error is not None:
+            show_error(error)
+            return None
         return out
 
     def _current_timepoint_volume(self, layer):

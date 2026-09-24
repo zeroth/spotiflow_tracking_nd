@@ -104,15 +104,34 @@ def extract_patch(volume, centre_zyx, radius_zyx):
     return volume[z - rz:z + rz + 1, y - ry:y + ry + 1, x - rx:x + rx + 1].astype(np.float64)
 
 
-def _fallback(centre_zyx, fallback_radius_zyx, patch=None) -> SpotFit3D:
+# How far the fitted centre may move from the detected one, in voxels.
+# `curve_fit` is unbounded, so on a crowded patch it will happily slide
+# off this spot and onto a brighter neighbour several voxels away, then
+# report *that* spot's amplitude under this spot's identity. Measured on
+# synthetic spots with the +/-1 voxel jitter a rounded detection carries,
+# a genuine fit moves at most ~1.5 voxels, so 2.0 keeps every real spot
+# and rejects the migration.
+_MAX_CENTRE_SHIFT = 2.0
+
+
+def _max_shift(radius: float) -> float:
+    """The shift cap, never wider than the patch it is measured in."""
+    return min(float(radius), _MAX_CENTRE_SHIFT)
+
+
+def _fallback(centre_zyx, fallback_radius_zyx) -> SpotFit3D:
+    """The spot's row when it was never successfully measured.
+
+    Sigma is a real fallback, because `paint_label_mask` still has to give
+    the spot an ellipsoid. The intensities are NaN, not patch statistics:
+    on a crowded patch `max - min` is a *neighbour's* brightness, which
+    would put failed rows at the top of an `integrated_intensity`
+    distribution instead of out of it. NaN drops out of a mean; zero does
+    not.
+    """
     z, y, x = (float(c) for c in centre_zyx)
     sz, sy, sx = (float(r) for r in fallback_radius_zyx)
-    if patch is None:
-        background = amplitude = 0.0
-    else:
-        background = float(np.min(patch))
-        amplitude = float(np.max(patch) - background)
-    return SpotFit3D(z, y, x, sz, sy, sx, amplitude, background, converged=False)
+    return SpotFit3D(z, y, x, sz, sy, sx, np.nan, np.nan, converged=False)
 
 
 def fit_patch(patch, centre_zyx, radius_zyx, fallback_radius_zyx) -> SpotFit3D:
@@ -131,7 +150,7 @@ def fit_patch(patch, centre_zyx, radius_zyx, fallback_radius_zyx) -> SpotFit3D:
     try:
         popt, _ = curve_fit(_gaussian_3d, coords, patch.ravel(), p0=p0, maxfev=2000)
     except Exception:
-        return _fallback(centre_zyx, fallback_radius_zyx, patch)
+        return _fallback(centre_zyx, fallback_radius_zyx)
 
     dz, dy, dx, sigma_z, sigma_y, sigma_x, amplitude, background = popt
     # `curve_fit` is unbounded here (bounds would cost the speed the whole
@@ -149,14 +168,14 @@ def fit_patch(patch, centre_zyx, radius_zyx, fallback_radius_zyx) -> SpotFit3D:
         and 0.0 < sigma_z <= 2 * radius_zyx[0] + 1
         and 0.0 < sigma_y <= 2 * radius_zyx[1] + 1
         and 0.0 < sigma_x <= 2 * radius_zyx[2] + 1
-        and abs(dz) <= radius_zyx[0]
-        and abs(dy) <= radius_zyx[1]
-        and abs(dx) <= radius_zyx[2]
+        and abs(dz) <= _max_shift(radius_zyx[0])
+        and abs(dy) <= _max_shift(radius_zyx[1])
+        and abs(dx) <= _max_shift(radius_zyx[2])
         and patch_range > 0.0
         and amplitude >= 0.2 * patch_range
     )
     if not plausible:
-        return _fallback(centre_zyx, fallback_radius_zyx, patch)
+        return _fallback(centre_zyx, fallback_radius_zyx)
 
     # The patch was cut around the rounded voxel, so the offset is relative
     # to that, not to the sub-voxel detection coordinate.

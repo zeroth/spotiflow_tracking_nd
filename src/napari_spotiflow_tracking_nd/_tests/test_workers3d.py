@@ -443,3 +443,89 @@ class TestDetectionWorkerFitting:
 
         assert not (tmp_path / "spots.csv").exists()
         assert tifffile.imread(str(mask_dir / files[0].name)).max() == 0
+
+
+class TestMaskExportRequiresFitting:
+    """A label mask is painted from the fits. With fitting off there are
+    no fits, so the old code wrote a full-size series of all-zero volumes:
+    113 GB of nothing for the reference dataset, with no error.
+    """
+
+    def test_a_mask_folder_without_fitting_is_refused(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
+
+        files = TestDetectionWorkerFitting._folder(tmp_path)
+        worker = DetectionWorker3D(
+            files=files, model=TestDetectionWorkerFitting._model(),
+            csv_path=tmp_path / "spots.csv",
+            fit=False, mask_output_dir=tmp_path / "masks",
+        )
+        errors = []
+        worker.errored.connect(errors.append)
+        worker.run()
+
+        assert errors, "the run must not silently write empty masks"
+        assert "fit" in errors[0].lower()
+        assert not list((tmp_path / "masks").glob("*.tif"))
+
+
+class TestMaskSeriesDtypeIsRunWide:
+    """`_io3d` refuses a series whose dtype changes partway through, so a
+    per-timepoint dtype choice can produce a mask folder this plugin's own
+    reader cannot open.
+    """
+
+    def test_the_whole_series_keeps_one_dtype_when_a_later_frame_needs_wider(
+        self, tmp_path, monkeypatch
+    ):
+        import napari_spotiflow_tracking_nd._fitting3d as F
+        from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
+
+        # Exercise the real widening path at a threshold small enough to
+        # reach with two spots instead of 65,536.
+        monkeypatch.setattr(F, "_UINT16_MAX_LABEL", 1)
+
+        files = TestDetectionWorkerFitting._folder(tmp_path, n_timepoints=2)
+        model = MagicMock()
+        details_one, details_two = MagicMock(), MagicMock()
+        details_one.prob = np.array([0.9])
+        details_two.prob = np.array([0.9, 0.7])
+        model.predict.side_effect = [
+            (np.array([[4.0, 8.0, 8.0]]), details_one),        # 1 spot  -> uint16
+            (np.array([[4.0, 8.0, 8.0], [4.0, 20.0, 20.0]]), details_two),  # 2 -> uint32
+        ]
+        worker = DetectionWorker3D(
+            files=files, model=model, csv_path=tmp_path / "spots.csv",
+            fit=True, max_workers=1, mask_output_dir=tmp_path / "masks",
+        )
+        worker.run()
+
+        written = sorted((tmp_path / "masks").glob("*.tif"))
+        assert len(written) == 2
+        dtypes = {tifffile.imread(str(p)).dtype for p in written}
+        assert len(dtypes) == 1, f"ragged mask series: {dtypes}"
+        assert dtypes == {np.dtype(np.uint32)}
+
+    def test_the_mask_series_loads_back_through_the_reader(self, tmp_path, monkeypatch):
+        import napari_spotiflow_tracking_nd._fitting3d as F
+        from napari_spotiflow_tracking_nd._io3d import load_folder_as_lazy_stack
+        from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
+
+        monkeypatch.setattr(F, "_UINT16_MAX_LABEL", 1)
+
+        files = TestDetectionWorkerFitting._folder(tmp_path, n_timepoints=2)
+        model = MagicMock()
+        d1, d2 = MagicMock(), MagicMock()
+        d1.prob, d2.prob = np.array([0.9]), np.array([0.9, 0.7])
+        model.predict.side_effect = [
+            (np.array([[4.0, 8.0, 8.0]]), d1),
+            (np.array([[4.0, 8.0, 8.0], [4.0, 20.0, 20.0]]), d2),
+        ]
+        worker = DetectionWorker3D(
+            files=files, model=model, csv_path=tmp_path / "spots.csv",
+            fit=True, max_workers=1, mask_output_dir=tmp_path / "masks",
+        )
+        worker.run()
+
+        stack, _ = load_folder_as_lazy_stack(tmp_path / "masks")  # must not raise
+        assert stack.shape[0] == 2

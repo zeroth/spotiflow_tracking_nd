@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -709,3 +710,72 @@ class TestFitControls:
         widget._run_preview()
 
         assert [l for l in viewer.layers if l.__class__.__name__ == "Labels"] == []
+
+
+class TestMaskFolderGuards:
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_mask_export_without_fitting_is_refused_before_any_run(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        TestPreview._setup(widget, viewer, tmp_path)
+        mock_load_model.return_value = TestPreview._mock_model()
+        widget._csv_path_edit.setText(str(tmp_path / "spots.csv"))
+        widget._export_masks_check.setChecked(True)
+        widget._mask_folder_edit.setText(str(tmp_path / "masks"))
+        widget._fit_check.setChecked(False)
+
+        with patch(
+            "napari_spotiflow_tracking_nd._detection_widget3d.show_error"
+        ) as mock_show_error:
+            widget._run_detection()
+
+        assert mock_show_error.called
+        assert "fit" in mock_show_error.call_args[0][0].lower()
+        assert not (tmp_path / "masks").exists()
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_the_mask_folder_may_not_be_the_input_folder(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        # Every mask is written as `mask_dir / input_file.name`, so this
+        # would overwrite the source acquisition volume by volume.
+        widget, viewer = detection_widget
+        TestPreview._setup(widget, viewer, tmp_path)
+        mock_load_model.return_value = TestPreview._mock_model()
+        widget._csv_path_edit.setText(str(tmp_path / "spots.csv"))
+        widget._fit_check.setChecked(True)
+        widget._export_masks_check.setChecked(True)
+        layer = viewer.layers[0]
+        input_dir = Path(layer.metadata["source_files"][0]).parent
+        widget._mask_folder_edit.setText(str(input_dir))
+        before = {p: p.read_bytes() for p in input_dir.glob("*.tif")}
+
+        with patch(
+            "napari_spotiflow_tracking_nd._detection_widget3d.show_error"
+        ) as mock_show_error:
+            widget._run_detection()
+
+        assert mock_show_error.called
+        assert "input folder" in mock_show_error.call_args[0][0]
+        assert {p: p.read_bytes() for p in input_dir.glob("*.tif")} == before
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_a_preview_without_fitting_clears_a_previous_mask_layer(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        # A stale mask beside freshly-thresholded points is worse than no
+        # mask: nothing on screen says it is from the old threshold.
+        widget, viewer = detection_widget
+        TestPreview._setup(widget, viewer, tmp_path)
+        mock_load_model.return_value = TestPreview._mock_model()
+
+        widget._fit_check.setChecked(True)
+        widget._run_preview()
+        assert "vol (spot mask preview)" in viewer.layers
+
+        widget._fit_check.setChecked(False)
+        widget._run_preview()
+
+        assert "vol (spot mask preview)" not in viewer.layers
+        assert "vol (spot preview)" in viewer.layers

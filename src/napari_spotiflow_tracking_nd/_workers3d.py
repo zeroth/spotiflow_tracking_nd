@@ -99,6 +99,7 @@ class DetectionWorker3D(QThread):
         self._patch_radius_zyx = tuple(patch_radius_zyx)
         self._mask_output_dir = Path(mask_output_dir) if mask_output_dir else None
         self._max_workers = max_workers
+        self._mask_dtype = None
         self._cancelled = False
 
     def cancel(self):
@@ -112,6 +113,14 @@ class DetectionWorker3D(QThread):
             # once, and a failure lands on `errored` like any other.
             if callable(self._model) and not hasattr(self._model, "predict"):
                 self._model = self._model()
+            if self._mask_output_dir is not None and not self._fit:
+                # The mask is painted from the fits: without them every
+                # volume would be written empty, one full-size file per
+                # timepoint, with nothing to show it had gone wrong.
+                raise ValueError(
+                    "Label-mask export needs Gaussian fitting turned on — "
+                    "the masks are painted from the fits."
+                )
             if self._csv_path.exists():
                 self._csv_path.unlink()
             if self._mask_output_dir is not None:
@@ -134,6 +143,7 @@ class DetectionWorker3D(QThread):
 
     def _detect_all(self, pool):
         header_written = False
+        written_masks = []
         total = len(self._files)
         for t, path in enumerate(self._files):
             if self._cancelled:
@@ -162,9 +172,32 @@ class DetectionWorker3D(QThread):
                 # Written even for a timepoint with no spots, so the mask
                 # series stays aligned 1:1 with the input series.
                 mask = paint_label_mask(volume.shape, fits or [], n_sigma=DEFAULT_N_SIGMA)
-                tifffile.imwrite(str(self._mask_output_dir / path.name), mask)
+                mask = self._to_run_dtype(mask, written_masks)
+                out = self._mask_output_dir / path.name
+                tifffile.imwrite(str(out), mask)
+                written_masks.append(out)
 
             self.progress.emit(t + 1, total)
+
+    def _to_run_dtype(self, mask, written_masks):
+        """Keep one dtype across the whole mask series.
+
+        `paint_label_mask` widens to uint32 only when a timepoint has more
+        than 65,535 spots, so a series that crosses that line partway
+        through would be ragged — and `_io3d.build_lazy_stack_from_files`
+        refuses a ragged series, making the plugin unable to open its own
+        output. When a later timepoint forces the wider dtype, the masks
+        already written are re-read and rewritten to match. That is slow,
+        but it happens at most once in a run and only past 65,535 spots.
+        """
+        if self._mask_dtype is None or mask.dtype.itemsize > np.dtype(self._mask_dtype).itemsize:
+            if self._mask_dtype is not None:
+                for earlier in written_masks:
+                    tifffile.imwrite(
+                        str(earlier), tifffile.imread(str(earlier)).astype(mask.dtype),
+                    )
+            self._mask_dtype = mask.dtype
+        return mask.astype(self._mask_dtype, copy=False)
 
     @staticmethod
     def _rows_for(t, points, details, fits):

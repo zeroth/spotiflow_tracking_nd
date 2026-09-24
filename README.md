@@ -48,9 +48,18 @@ whole-movie-in-RAM) version this plugin is ported from.
   turning fitting on never moves coordinates under anything downstream.
   A spot whose fit fails, or which sits too close to a volume edge to cut
   a full patch, keeps its row with `converged=False` and a fallback σ
-  rather than disappearing.
+  rather than disappearing; its `amplitude`, `background` and
+  `integrated_intensity` are `NaN`, because nothing was measured — they
+  drop out of a mean instead of contaminating it. A fit that slides more
+  than two voxels off the detected centre is rejected the same way: on
+  crowded data an unbounded fit will otherwise migrate onto a brighter
+  neighbour and report *its* amplitude under this spot's identity.
 - **Label masks (optional)** — each fitted spot painted as an ellipsoid
-  out to 2σ, one label per spot. Shown as a Labels layer when you
+  out to 2σ, one label per spot. Needs Gaussian fitting on, since that is
+  what the ellipsoids come from; the run is refused rather than writing a
+  series of empty volumes. The mask folder may not be the input folder —
+  masks are written under the input filenames, so that would overwrite
+  the acquisition. Shown as a Labels layer when you
   **Preview** with fitting on; written to disk as one label TIFF per
   timepoint only when you ask, because a label volume is the same size as
   the data (a 349-timepoint series is ~113 GB). The masks are
