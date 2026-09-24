@@ -217,3 +217,55 @@ def fit_spots_3d(
             fits[i] = _fit_patch(args)
 
     return [f for f in fits if f is not None]
+
+
+DEFAULT_N_SIGMA = 2.0
+# A uint16 label of 65536 wraps to 0 — background — which would silently
+# erase spots from the mask rather than fail. Above this many spots the
+# mask is uint32 instead.
+_UINT16_MAX_LABEL = 65535
+
+
+def paint_label_mask(shape, fits, n_sigma: float = DEFAULT_N_SIGMA) -> np.ndarray:
+    """A labelled volume: label `i + 1` for `fits[i]`.
+
+    Each spot is the ellipsoid within `n_sigma` standard deviations of its
+    fitted centre, so an anisotropic fit paints an anisotropic blob. Spots
+    are painted in order, so where two overlap the later label wins.
+
+    Every fit gets at least its centre voxel, including failed ones and
+    ones whose ellipsoid is narrower than a voxel: a spot present in the
+    CSV is present in the mask.
+    """
+    dtype = np.uint16 if len(fits) <= _UINT16_MAX_LABEL else np.uint32
+    mask = np.zeros(shape, dtype=dtype)
+
+    for label, fit in enumerate(fits, start=1):
+        radius_z = max(n_sigma * fit.sigma_z, 0.0)
+        radius_y = max(n_sigma * fit.sigma_y, 0.0)
+        radius_x = max(n_sigma * fit.sigma_x, 0.0)
+
+        z_lo = max(int(np.floor(fit.z0 - radius_z)), 0)
+        z_hi = min(int(np.ceil(fit.z0 + radius_z)) + 1, shape[0])
+        y_lo = max(int(np.floor(fit.y0 - radius_y)), 0)
+        y_hi = min(int(np.ceil(fit.y0 + radius_y)) + 1, shape[1])
+        x_lo = max(int(np.floor(fit.x0 - radius_x)), 0)
+        x_hi = min(int(np.ceil(fit.x0 + radius_x)) + 1, shape[2])
+
+        if z_lo < z_hi and y_lo < y_hi and x_lo < x_hi and min(radius_z, radius_y, radius_x) > 0:
+            zz, yy, xx = np.ogrid[z_lo:z_hi, y_lo:y_hi, x_lo:x_hi]
+            inside = (
+                ((zz - fit.z0) / radius_z) ** 2
+                + ((yy - fit.y0) / radius_y) ** 2
+                + ((xx - fit.x0) / radius_x) ** 2
+            ) <= 1.0
+            mask[z_lo:z_hi, y_lo:y_hi, x_lo:x_hi][inside] = label
+
+        # The ellipsoid can round away to nothing for a very sharp spot;
+        # the centre voxel is painted unconditionally so the spot is never
+        # in the CSV but absent from the mask.
+        cz, cy, cx = (int(round(fit.z0)), int(round(fit.y0)), int(round(fit.x0)))
+        if 0 <= cz < shape[0] and 0 <= cy < shape[1] and 0 <= cx < shape[2]:
+            mask[cz, cy, cx] = label
+
+    return mask

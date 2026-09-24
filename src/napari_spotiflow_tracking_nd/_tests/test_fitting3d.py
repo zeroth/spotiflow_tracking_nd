@@ -215,3 +215,97 @@ class TestEmptyAndShape:
 
         assert extract_patch(volume, (0, 8, 8), (3, 5, 5)) is None
         assert extract_patch(volume, (4, 8, 8), (3, 5, 5)).shape == (7, 11, 11)
+
+
+class TestPaintLabelMask:
+    def test_one_label_per_spot_in_order(self):
+        from napari_spotiflow_tracking_nd._fitting3d import SpotFit3D, paint_label_mask
+
+        fits = [
+            SpotFit3D(6.0, 10.0, 10.0, 1.5, 2.0, 2.0, 100.0, 0.0, True),
+            SpotFit3D(6.0, 30.0, 30.0, 1.5, 2.0, 2.0, 100.0, 0.0, True),
+        ]
+
+        mask = paint_label_mask((16, 48, 48), fits)
+
+        assert mask[6, 10, 10] == 1
+        assert mask[6, 30, 30] == 2
+        assert set(np.unique(mask)) == {0, 1, 2}
+
+    def test_the_ellipsoid_is_anisotropic_as_the_sigmas_say(self):
+        from napari_spotiflow_tracking_nd._fitting3d import SpotFit3D, paint_label_mask
+
+        # Wide in y, narrow in z.
+        fits = [SpotFit3D(10.0, 24.0, 24.0, 1.0, 4.0, 1.0, 100.0, 0.0, True)]
+        mask = paint_label_mask((24, 48, 48), fits, n_sigma=2.0)
+
+        extent_z = (mask[:, 24, 24] == 1).sum()
+        extent_y = (mask[10, :, 24] == 1).sum()
+        assert extent_y > 2 * extent_z
+
+    def test_a_failed_fit_is_still_painted(self):
+        from napari_spotiflow_tracking_nd._fitting3d import SpotFit3D, paint_label_mask
+
+        fits = [SpotFit3D(8.0, 16.0, 16.0, 1.5, 2.5, 2.5, 0.0, 0.0, False)]
+
+        mask = paint_label_mask((16, 32, 32), fits)
+
+        assert mask[8, 16, 16] == 1, "a spot in the CSV must be in the mask"
+
+    def test_a_sub_voxel_spot_still_occupies_its_centre(self):
+        # 2 * 0.2 = 0.4 voxels: the ellipsoid rounds to nothing, and the
+        # spot would vanish from the mask while sitting in the CSV.
+        from napari_spotiflow_tracking_nd._fitting3d import SpotFit3D, paint_label_mask
+
+        fits = [SpotFit3D(8.0, 16.0, 16.0, 0.2, 0.2, 0.2, 100.0, 0.0, True)]
+
+        mask = paint_label_mask((16, 32, 32), fits)
+
+        assert mask[8, 16, 16] == 1
+        assert (mask == 1).sum() >= 1
+
+    def test_overlapping_spots_let_the_later_label_win(self):
+        from napari_spotiflow_tracking_nd._fitting3d import SpotFit3D, paint_label_mask
+
+        fits = [
+            SpotFit3D(8.0, 16.0, 16.0, 2.0, 3.0, 3.0, 100.0, 0.0, True),
+            SpotFit3D(8.0, 16.0, 16.0, 2.0, 3.0, 3.0, 100.0, 0.0, True),
+        ]
+
+        mask = paint_label_mask((16, 32, 32), fits)
+
+        assert mask[8, 16, 16] == 2
+
+    def test_a_spot_at_the_volume_edge_is_clipped_not_wrapped(self):
+        from napari_spotiflow_tracking_nd._fitting3d import SpotFit3D, paint_label_mask
+
+        fits = [SpotFit3D(0.0, 0.0, 0.0, 2.0, 3.0, 3.0, 100.0, 0.0, True)]
+
+        mask = paint_label_mask((16, 32, 32), fits)
+
+        assert mask[0, 0, 0] == 1
+        assert mask[-1, -1, -1] == 0, "the ellipsoid must not wrap around"
+
+    def test_no_fits_gives_an_empty_mask(self):
+        from napari_spotiflow_tracking_nd._fitting3d import paint_label_mask
+
+        mask = paint_label_mask((8, 16, 16), [])
+
+        assert mask.shape == (8, 16, 16)
+        assert mask.max() == 0
+
+    def test_more_than_65535_spots_do_not_wrap_to_background(self):
+        # uint16 label 65536 wraps to 0, silently erasing spots from the
+        # mask. Plausible on deconvolved data at a low threshold.
+        from napari_spotiflow_tracking_nd._fitting3d import SpotFit3D, paint_label_mask
+
+        n = 70000
+        fits = [
+            SpotFit3D(1.0, float(i % 300), float(i // 300), 0.4, 0.4, 0.4, 10.0, 0.0, True)
+            for i in range(n)
+        ]
+
+        mask = paint_label_mask((3, 300, 300), fits)
+
+        assert mask.dtype == np.uint32
+        assert mask.max() == n
