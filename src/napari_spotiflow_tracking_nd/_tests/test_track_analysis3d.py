@@ -283,10 +283,65 @@ class TestAnalyseTrackIntensity:
         assert row["max_intensity"] == 1000.0
         assert row["n_steps"] == 1
         assert set(steps[0]) == set(STEP_COLUMNS)
-        # The ported 2D detector lands on the last high point, one early.
-        assert steps[0]["frame"] in (14, 15)
-        assert steps[0]["step_height"] == pytest.approx(-600, rel=0.1)
+        # The first point of the new level, not the ported detector's last
+        # point of the old one.
+        assert steps[0]["frame"] == 15
+        assert steps[0]["step_height"] == -600
         assert row["mean_step_height"] == steps[0]["step_height"]
+
+    def test_dwells_are_in_frames_across_failed_fits(self):
+        # Review focus: frames 3 and 20 failed, so each level has 14 trace
+        # points but lasts 15 frames; the dwells span the trace's frames.
+        from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track
+
+        frames = np.arange(30)
+        converged = np.ones(30, dtype=bool)
+        converged[[3, 20]] = False
+
+        _, _, steps = analyse_track(
+            _track(np.zeros((30, 3)), integrated_intensity=np.where(frames < 15, 1000.0, 400.0),
+                   converged=converged),
+            PARAMS,
+        )
+
+        assert (steps[0]["dwell_before"], steps[0]["dwell_after"]) == (15, 15)
+        assert steps[0]["dwell_before"] + steps[0]["dwell_after"] == 30
+
+    def test_three_levels_have_two_steps_with_dwells_in_frames(self):
+        from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track
+
+        frames = np.arange(45)
+        values = np.select([frames < 15, frames < 30], [1000.0, 600.0], 200.0)
+        converged = frames != 20  # a failed fit inside the middle level
+
+        _, _, steps = analyse_track(
+            _track(np.zeros((45, 3)), integrated_intensity=values, converged=converged), PARAMS,
+        )
+
+        assert [s["frame"] for s in steps] == [15, 30]
+        assert [s["step_height"] for s in steps] == [-400, -400]
+        assert [(s["dwell_before"], s["dwell_after"]) for s in steps] == [(15, 15), (15, 15)]
+
+    @pytest.mark.parametrize("n_high, n_low", [(7, 7), (10, 5), (15, 15), (5, 10)])
+    def test_a_clean_step_is_measured_exactly(self, n_high, n_low):
+        # Review focus: the ported detector's index is the last high point;
+        # counted into the low level it biased the height (-525..-600).
+        from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track
+
+        n = n_high + n_low
+        values = np.r_[np.full(n_high, 1000.0), np.full(n_low, 400.0)]
+        frames = 100 + np.arange(n)
+
+        row, _, steps = analyse_track(
+            _track(np.zeros((n, 3)), frames=frames, integrated_intensity=values, converged=True),
+            PARAMS,
+        )
+
+        assert row["n_steps"] == 1
+        assert steps[0]["frame"] == 100 + n_high
+        assert steps[0]["level_before"] == 1000 and steps[0]["level_after"] == 400
+        assert steps[0]["step_height"] == -600
+        assert (steps[0]["dwell_before"], steps[0]["dwell_after"]) == (n_high, n_low)
 
     def test_a_trace_too_short_for_the_window_is_not_assessed(self):
         from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track

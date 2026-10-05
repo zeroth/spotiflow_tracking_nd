@@ -269,6 +269,56 @@ def find_steps(data, window: int = 20, threshold: float = 0.5):
     return table, fitx, gaussian_normalise
 
 
+def refine_step_indices(trace, indices) -> list[int]:
+    """Move each detected step index by at most one point to the
+    least-squares boundary between its two adjacent levels.
+
+    `find_steps` reports the last point of the old level, which its table
+    then counts into the new one — biasing both the step's position and
+    its height. Each refined index is the first point of the new level,
+    kept strictly between its neighbours (the previous refined index, or
+    the trace start; the next detected index, or the trace end) so no
+    level is ever empty.
+    """
+    trace = np.asarray(trace, dtype=float)
+    refined = []
+    for k, index in enumerate(indices):
+        start = refined[-1] if refined else 0
+        stop = indices[k + 1] if k + 1 < len(indices) else len(trace)
+        best, best_cost = None, np.inf
+        for split in (index, index - 1, index + 1):  # ties keep the detected index
+            if not start < split < stop:
+                continue
+            before, after = trace[start:split], trace[split:stop]
+            cost = ((before - before.mean()) ** 2).sum() + ((after - after.mean()) ** 2).sum()
+            if cost < best_cost:
+                best, best_cost = split, cost
+        if best is not None:
+            refined.append(best)
+    return refined
+
+
+def measure_steps(track_id: int, trace_frames, trace, indices) -> list[dict]:
+    """`steps.csv` rows for steps at trace `indices` (each the first point
+    of its new level). Levels are the means between neighbouring steps;
+    dwells are in frames, from the trace's frame numbers — a failed fit
+    is a missing point, not a shorter dwell."""
+    trace = np.asarray(trace, dtype=float)
+    bounds = [0, *indices, len(trace)]
+    # The frame each level starts at, plus the frame after the trace ends.
+    starts = [int(trace_frames[b]) for b in bounds[:-1]] + [int(trace_frames[-1]) + 1]
+    rows = []
+    for k, index in enumerate(indices, start=1):
+        before = float(trace[bounds[k - 1]:index].mean())
+        after = float(trace[index:bounds[k + 1]].mean())
+        rows.append({
+            "track_id": track_id, "frame": starts[k],
+            "level_before": before, "level_after": after, "step_height": after - before,
+            "dwell_before": starts[k] - starts[k - 1], "dwell_after": starts[k + 1] - starts[k],
+        })
+    return rows
+
+
 def intensity_trace(track: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     """`(frames, values)`: the track's converged spots' finite
     `integrated_intensity`, in frame order. Empty without fit columns —
@@ -352,15 +402,13 @@ def analyse_track(
         except Exception:
             steps = None
         if steps is not None:
-            row["n_steps"] = len(steps)
-            if steps:
-                row["mean_step_height"] = float(np.mean([s[3] for s in steps]))
-            for index, before, after, height, dwell_before, dwell_after, _error in steps:
-                step_rows.append({
-                    "track_id": track_id, "frame": int(trace_frames[index]),
-                    "level_before": before, "level_after": after, "step_height": height,
-                    "dwell_before": int(dwell_before), "dwell_after": int(dwell_after),
-                })
+            # Detection is the ported 2D detector's; positions, levels and
+            # dwells are measured here from the refined indices.
+            indices = refine_step_indices(trace, [int(s[0]) for s in steps])
+            step_rows = measure_steps(track_id, trace_frames, trace, indices)
+            row["n_steps"] = len(step_rows)
+            if step_rows:
+                row["mean_step_height"] = float(np.mean([r["step_height"] for r in step_rows]))
     return {c: row[c] for c in PROPERTY_COLUMNS}, msd_rows, step_rows
 
 
