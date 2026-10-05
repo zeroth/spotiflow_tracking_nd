@@ -372,11 +372,15 @@ def analyse_track(
         d = alpha = np.nan
         fit = np.full(len(table), np.nan)
         if len(track) >= params.min_msd_spots and len(table) >= MIN_FIT_LAGS:
-            d, alpha = fit_msd(lag_s, table["msd"].to_numpy(), k)
+            # Fit only the first quarter of the track's lags (at least
+            # MIN_FIT_LAGS): long lags rest on few, overlapping pairs and,
+            # unweighted, would dominate the fit.
+            n_fit = min(len(table), params.max_lag, max(MIN_FIT_LAGS, len(frames) // 4))
+            d, alpha = fit_msd(lag_s[:n_fit], table["msd"].to_numpy()[:n_fit], k)
             if np.isfinite(d):
                 fit = k * d * np.power(lag_s, alpha)
                 if dims == "3d":
-                    lags_fitted = len(table)
+                    lags_fitted = n_fit
         row[f"D_{dims}"], row[f"alpha_{dims}"] = d, alpha
         for (lag, rec), lag_seconds, fitted in zip(table.iterrows(), lag_s, fit):
             msd_rows.append({

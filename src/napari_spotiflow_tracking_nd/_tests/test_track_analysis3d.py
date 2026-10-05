@@ -219,12 +219,29 @@ class TestAnalyseTrackMotion:
         rng = np.random.default_rng(6)
         row, msd_rows, _ = analyse_track(_track(np.cumsum(rng.normal(0, 0.2, (30, 3)), axis=0)), PARAMS)
 
-        assert row["msd_lags_fitted"] == 25
+        # 30 frames: the first quarter of the lags, 30 // 4 = 7, is fitted.
+        assert row["msd_lags_fitted"] == 7
         assert {r["dims"] for r in msd_rows} == {"3d", "xy"}
         assert all(set(r) == set(MSD_COLUMNS) for r in msd_rows)
-        first = next(r for r in msd_rows if r["dims"] == "3d" and r["lag_frames"] == 1)
-        assert first["lag_s"] == 3.0
-        assert np.isfinite(first["msd_fit"])
+        curve = [r for r in msd_rows if r["dims"] == "3d"]
+        # Every lag to Max lag is still reported, the fit evaluated at each.
+        assert [r["lag_frames"] for r in curve] == list(range(1, 26))
+        assert curve[0]["lag_s"] == 3.0
+        assert all(np.isfinite(r["msd_fit"]) for r in curve)
+
+    def test_short_brownian_tracks_are_mostly_diffusive(self):
+        # Review focus: fitted to lag 25, the few-pair long lags dominated
+        # and 30-frame random walks came out only ~56 % diffusive.
+        from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track
+
+        rng = np.random.default_rng(7)
+        classes = []
+        for track_id in range(400):
+            steps = rng.normal(0, np.sqrt(2 * 0.01 * 3.0), size=(30, 3))
+            row, _, _ = analyse_track(_track(np.cumsum(steps, axis=0), track_id), PARAMS)
+            classes.append(row["motility_class"])
+
+        assert classes.count("diffusive") / len(classes) >= 0.75
 
 
 class TestAnalyseTrackGeometryAndLifetime:
