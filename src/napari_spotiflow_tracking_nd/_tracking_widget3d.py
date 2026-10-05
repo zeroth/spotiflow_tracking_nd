@@ -83,6 +83,9 @@ class TrackingWidget3D(RunStateMixin, QWidget):
         # The spots layer the current input CSV came from, if any — its
         # scale is the fallback for an uncalibrated run.
         self._source_layer = None
+        # The input last set through `_set_input_csv`, to tell a typed or
+        # pasted path from the one already adopted.
+        self._last_input_csv = ""
         self._summary = ""
         self._setup_ui()
         self._connect_events()
@@ -224,6 +227,7 @@ class TrackingWidget3D(RunStateMixin, QWidget):
         self.viewer.layers.events.inserted.connect(self._refresh_points_combo)
         self.viewer.layers.events.removed.connect(self._refresh_points_combo)
         self._points_combo.currentTextChanged.connect(self._on_points_layer_chosen)
+        self._csv_path_edit.editingFinished.connect(self._on_csv_path_typed)
         for spin in (self._search_range_xy_spin, self._pixel_size_xy_spin, self._voxel_size_z_spin):
             spin.valueChanged.connect(self._update_z_range)
         self._link_calibration_check.toggled.connect(self._update_z_range)
@@ -248,6 +252,11 @@ class TrackingWidget3D(RunStateMixin, QWidget):
         layer = self.viewer.layers[name]
         self._set_input_csv(layer.metadata["csv_path"], layer)
 
+    def _on_csv_path_typed(self):
+        text = self._csv_path_edit.text().strip()
+        if text and text != self._last_input_csv:
+            self._set_input_csv(text)
+
     def _browse_input_csv(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open detection CSV", "", "CSV files (*.csv)")
         if path:
@@ -265,6 +274,7 @@ class TrackingWidget3D(RunStateMixin, QWidget):
         prefill calibration — the layer's values first, then the CSV's
         sidecar, else blank."""
         self._source_layer = layer
+        self._last_input_csv = str(csv_path)
         self._csv_path_edit.setText(str(csv_path))
         self._output_path_edit.setText(str(default_tracks_path(csv_path)))
 
@@ -346,6 +356,13 @@ class TrackingWidget3D(RunStateMixin, QWidget):
                 "different output path."
             )
             return
+        if same_file(calibration_sidecar_path(out_path), calibration_sidecar_path(csv_path)):
+            show_error(
+                "The tracks sidecar would overwrite the detection CSV's "
+                "sidecar — give the output path a different name, ending "
+                "in .csv."
+            )
+            return
         search_range = self._search_range_zyx()
         if search_range is None:
             return
@@ -386,8 +403,16 @@ class TrackingWidget3D(RunStateMixin, QWidget):
                 show_info("Tracking stopped before any spot was linked — nothing written.")
                 return
             sidecar = calibration_sidecar_path(written)
+            # A cancelled run's CSV is a prefix of the series; the sidecar is
+            # what says so (the layer name does not outlive the session).
+            run_record = {
+                **record,
+                "cancelled": self._cancel_requested,
+                "first_frame": worker.first_frame,
+                "last_frame": worker.last_frame,
+            }
             try:
-                sidecar.write_text(json.dumps(record, indent=2), encoding="utf-8")
+                sidecar.write_text(json.dumps(run_record, indent=2), encoding="utf-8")
             except OSError as exc:
                 show_error(f"Could not write the tracking sidecar {sidecar}: {exc}")
             tracks = pd.read_csv(written)
@@ -412,12 +437,14 @@ class TrackingWidget3D(RunStateMixin, QWidget):
         # first keeps `features` aligned with the rows they describe.
         tracks = tracks.sort_values(["particle", "frame"], kind="stable").reset_index(drop=True)
         data = tracks[["particle", "frame", *LINK_COLUMNS]].to_numpy(dtype=float)
-        if calibration["pixel_size_xy_um"] and calibration["voxel_size_z_um"]:
+        # The spots layer is what the tracks must overlay, so its scale wins
+        # over typed calibration (which may describe an uncalibrated image).
+        if source_layer is not None:
+            scale = tuple(source_layer.scale)
+        elif calibration["pixel_size_xy_um"] and calibration["voxel_size_z_um"]:
             scale = compute_layer_scale(
                 calibration["pixel_size_xy_um"], calibration["voxel_size_z_um"]
             )
-        elif source_layer is not None:
-            scale = tuple(source_layer.scale)
         else:
             scale = (1.0, 1.0, 1.0, 1.0)
         features = tracks[[c for c in FEATURE_COLUMNS if c in tracks.columns]]

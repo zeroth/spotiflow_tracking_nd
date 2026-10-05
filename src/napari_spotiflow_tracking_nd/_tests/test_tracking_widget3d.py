@@ -149,6 +149,31 @@ class TestCalibrationPrefill:
 
         assert widget._pixel_size_xy_spin.value() == 0
 
+    def test_a_typed_path_re_adopts_output_and_calibration(self, tracking_widget, tmp_path):
+        widget, viewer = tracking_widget
+        a = _write_spots_csv(tmp_path / "a.csv")
+        b = _write_spots_csv(tmp_path / "b.csv")
+        (tmp_path / "a.json").write_text(json.dumps({"pixel_size_xy_um": 0.1}))
+        (tmp_path / "b.json").write_text(json.dumps({"pixel_size_xy_um": 0.2}))
+        _add_spots_layer(viewer, a)
+        assert widget._pixel_size_xy_spin.value() == pytest.approx(0.1)
+
+        widget._csv_path_edit.setText(str(b))
+        widget._csv_path_edit.editingFinished.emit()
+
+        assert widget._output_path_edit.text() == str(tmp_path / "b_tracks.csv")
+        assert widget._pixel_size_xy_spin.value() == pytest.approx(0.2)
+        assert widget._source_layer is None
+
+    def test_finishing_an_unchanged_path_keeps_a_hand_edited_output(self, tracking_widget, tmp_path):
+        widget, viewer = tracking_widget
+        _add_spots_layer(viewer, _write_spots_csv(tmp_path / "a.csv"))
+        widget._output_path_edit.setText(str(tmp_path / "mine.csv"))
+
+        widget._csv_path_edit.editingFinished.emit()
+
+        assert widget._output_path_edit.text() == str(tmp_path / "mine.csv")
+
 
 class TestSearchRange:
     def test_unlinked_uses_the_z_box_as_typed(self, tracking_widget):
@@ -216,6 +241,17 @@ class TestRun:
         assert tuple(layer.scale) == pytest.approx((1.0, 0.3, 0.1, 0.1))
         assert layer.name == "spots (tracks)"
 
+    def test_typed_calibration_does_not_move_tracks_off_their_spots_layer(self, tracking_widget, tmp_path):
+        widget, viewer = tracking_widget
+        _add_spots_layer(viewer, _write_spots_csv(tmp_path / "spots.csv"))
+        widget._pixel_size_xy_spin.setValue(0.5)
+        widget._voxel_size_z_spin.setValue(0.5)
+
+        widget._run_tracking()
+
+        (layer,) = _tracks_layers(viewer)
+        assert tuple(layer.scale) == pytest.approx((1.0, 0.210, 0.104, 0.104))
+
     def test_the_sidecar_records_calibration_and_parameters(self, tracking_widget, tmp_path):
         import trackpy
 
@@ -238,6 +274,45 @@ class TestRun:
         assert record["adaptive"] is False
         assert record["source_csv"] == str(csv)
         assert record["trackpy_version"] == trackpy.__version__
+
+    def test_the_sidecar_marks_a_complete_run(self, tracking_widget, tmp_path):
+        widget, _ = tracking_widget
+        widget._set_input_csv(_write_spots_csv(tmp_path / "spots.csv", n_frames=4))
+
+        widget._run_tracking()
+
+        record = json.loads((tmp_path / "spots_tracks.json").read_text())
+        frames = pd.read_csv(tmp_path / "spots_tracks.csv")["frame"]
+        assert record["cancelled"] is False
+        assert (record["first_frame"], record["last_frame"]) == (frames.min(), frames.max())
+
+    def test_the_sidecar_marks_a_cancelled_run(self, tracking_widget, tmp_path):
+        widget, _ = tracking_widget
+        widget._set_input_csv(_write_spots_csv(tmp_path / "spots.csv", n_frames=10))
+        widget._progress_bar.valueChanged.connect(
+            lambda value: widget._cancel_btn.click() if value == 3 else None
+        )
+
+        widget._run_tracking()
+
+        record = json.loads((tmp_path / "spots_tracks.json").read_text())
+        assert record["cancelled"] is True
+        assert (record["first_frame"], record["last_frame"]) == (0, 2)
+
+    def test_an_output_whose_sidecar_would_clobber_the_detection_sidecar_is_refused(
+        self, tracking_widget, tmp_path,
+    ):
+        widget, viewer = tracking_widget
+        csv = _write_spots_csv(tmp_path / "spots.csv")
+        (tmp_path / "spots.json").write_text('{"pixel_size_xy_um": 0.1}')
+        widget._set_input_csv(csv)
+        widget._output_path_edit.setText(str(tmp_path / "spots.txt"))
+
+        widget._run_tracking()
+
+        assert _tracks_layers(viewer) == []
+        assert not (tmp_path / "spots.txt").exists()
+        assert (tmp_path / "spots.json").read_text() == '{"pixel_size_xy_um": 0.1}'
 
     def test_the_status_reports_the_summary(self, tracking_widget, tmp_path):
         widget, _ = tracking_widget
