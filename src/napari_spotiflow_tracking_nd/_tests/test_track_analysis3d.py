@@ -125,3 +125,226 @@ class TestFitMsd:
         d, alpha = fit_msd([3.0, 6.0], [np.nan, np.inf], k=6.0)
 
         assert np.isnan(d) and np.isnan(alpha)
+
+
+class TestAnalyseTrackMotion:
+    def test_a_brownian_walk_recovers_d_and_alpha_in_3d_and_xy(self):
+        from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track
+
+        rng = np.random.default_rng(1)
+        true_d, dt = 0.01, 3.0
+        d3, a3, dxy, axy = [], [], [], []
+        for track_id in range(150):
+            steps = rng.normal(0, np.sqrt(2 * true_d * dt), size=(100, 3))
+            row, _, _ = analyse_track(_track(np.cumsum(steps, axis=0), track_id), PARAMS)
+            d3.append(row["D_3d"])
+            a3.append(row["alpha_3d"])
+            dxy.append(row["D_xy"])
+            axy.append(row["alpha_xy"])
+
+        assert np.median(a3) == pytest.approx(1.0, abs=0.15)
+        assert np.median(d3) == pytest.approx(true_d, rel=0.25)
+        assert np.median(axy) == pytest.approx(1.0, abs=0.15)
+        assert np.median(dxy) == pytest.approx(true_d, rel=0.25)
+
+    def test_constant_velocity_is_directed(self):
+        from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track
+
+        rng = np.random.default_rng(2)
+        t = np.arange(40)
+        pos = np.column_stack([0 * t, 0 * t, 0.2 * t]) + rng.normal(0, 0.01, (40, 3))
+
+        row, _, _ = analyse_track(_track(pos), PARAMS)
+
+        assert row["alpha_3d"] > 1.2
+        assert row["motility_class"] == "directed"
+
+    def test_jitter_in_place_is_constrained(self):
+        from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track
+
+        rng = np.random.default_rng(3)
+
+        row, _, _ = analyse_track(_track(rng.normal(0, 0.02, (40, 3))), PARAMS)
+
+        assert row["motility_class"] == "constrained"
+
+    def test_motility_from_xy_uses_alpha_xy(self):
+        from dataclasses import replace
+
+        from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track
+
+        # Directed along z only: xy is stationary jitter.
+        rng = np.random.default_rng(4)
+        t = np.arange(40)
+        pos = np.column_stack([0.2 * t, 0 * t, 0 * t]) + rng.normal(0, 0.01, (40, 3))
+
+        row_3d, _, _ = analyse_track(_track(pos), PARAMS)
+        row_xy, _, _ = analyse_track(_track(pos), replace(PARAMS, motility_from="xy"))
+
+        assert row_3d["motility_class"] == "directed"
+        assert row_xy["motility_class"] == "constrained"
+
+    def test_a_short_track_is_not_fitted(self):
+        from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track
+
+        row, msd_rows, _ = analyse_track(_track(np.random.default_rng(5).normal(0, 0.1, (9, 3))), PARAMS)
+
+        assert np.isnan(row["D_3d"]) and np.isnan(row["alpha_xy"])
+        assert row["msd_lags_fitted"] == 0
+        assert row["motility_class"] == "unclassified"
+        # The curve is still reported, unfitted.
+        assert msd_rows and all(np.isnan(r["msd_fit"]) for r in msd_rows)
+
+    def test_a_fitted_track_reports_its_curve_and_fit(self):
+        from napari_spotiflow_tracking_nd._track_analysis3d import MSD_COLUMNS, analyse_track
+
+        rng = np.random.default_rng(6)
+        row, msd_rows, _ = analyse_track(_track(np.cumsum(rng.normal(0, 0.2, (30, 3)), axis=0)), PARAMS)
+
+        assert row["msd_lags_fitted"] == 25
+        assert {r["dims"] for r in msd_rows} == {"3d", "xy"}
+        assert all(set(r) == set(MSD_COLUMNS) for r in msd_rows)
+        first = next(r for r in msd_rows if r["dims"] == "3d" and r["lag_frames"] == 1)
+        assert first["lag_s"] == 3.0
+        assert np.isfinite(first["msd_fit"])
+
+
+class TestAnalyseTrackGeometryAndLifetime:
+    def test_anisotropic_steps_and_gap_bookkeeping(self):
+        from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track
+
+        # One z-voxel step (0.210 µm), then a gap, then one x-pixel step (0.104 µm).
+        row, _, _ = analyse_track(
+            _track([[0, 0, 0], [0.210, 0, 0], [0.210, 0, 0.104]], frames=[0, 1, 3]), PARAMS,
+        )
+
+        assert row["path_length_um"] == pytest.approx(0.314)
+        assert row["net_displacement_um"] == pytest.approx(np.hypot(0.210, 0.104))
+        assert row["n_spots"] == 3
+        assert row["n_gap_frames"] == 1
+        assert row["lifetime_frames"] == 4
+        assert row["lifetime_s"] == 12.0
+        assert row["mean_speed_um_s"] == pytest.approx(0.314 / 9.0)
+
+    def test_censored_is_carried_through(self):
+        from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track
+
+        row, _, _ = analyse_track(_track(np.zeros((3, 3)), censored=True), PARAMS)
+
+        assert row["censored"] is True
+
+    def test_a_single_spot_track_is_all_nan_motion_and_no_crash(self):
+        # Review focus: tracking's min length defaults to 1.
+        from napari_spotiflow_tracking_nd._track_analysis3d import PROPERTY_COLUMNS, analyse_track
+
+        row, msd_rows, step_rows = analyse_track(_track([[1.0, 2.0, 3.0]], frames=[7]), PARAMS)
+
+        assert list(row) == PROPERTY_COLUMNS
+        assert row["lifetime_frames"] == 1 and row["lifetime_s"] == 3.0
+        assert row["path_length_um"] == 0.0 and row["net_displacement_um"] == 0.0
+        assert np.isnan(row["mean_speed_um_s"])
+        assert np.isnan(row["D_3d"]) and row["motility_class"] == "unclassified"
+        assert msd_rows == [] and step_rows == []
+
+
+class TestAnalyseTrackIntensity:
+    def test_a_two_level_trace_with_failed_fits_has_one_step(self):
+        from napari_spotiflow_tracking_nd._track_analysis3d import STEP_COLUMNS, analyse_track
+
+        frames = np.arange(30)
+        values = np.where(frames < 15, 1000.0, 400.0)
+        converged = np.ones(30, dtype=bool)
+        converged[[3, 20]] = False
+
+        row, _, steps = analyse_track(
+            _track(np.zeros((30, 3)), integrated_intensity=values, converged=converged), PARAMS,
+        )
+
+        assert row["n_intensity_points"] == 28
+        assert row["mean_intensity"] == pytest.approx((14 * 1000 + 14 * 400) / 28)
+        assert row["max_intensity"] == 1000.0
+        assert row["n_steps"] == 1
+        assert set(steps[0]) == set(STEP_COLUMNS)
+        # The ported 2D detector lands on the last high point, one early.
+        assert steps[0]["frame"] in (14, 15)
+        assert steps[0]["step_height"] == pytest.approx(-600, rel=0.1)
+        assert row["mean_step_height"] == steps[0]["step_height"]
+
+    def test_a_trace_too_short_for_the_window_is_not_assessed(self):
+        from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track
+
+        row, _, steps = analyse_track(
+            _track(np.zeros((6, 3)), integrated_intensity=1000.0, converged=True), PARAMS,
+        )
+
+        # 6 points < 2 × 3 + 1: NaN, not zero steps.
+        assert np.isnan(row["n_steps"]) and np.isnan(row["mean_step_height"])
+        assert steps == []
+
+    def test_a_flat_trace_has_zero_steps(self):
+        from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track
+
+        row, _, steps = analyse_track(
+            _track(np.zeros((20, 3)), integrated_intensity=1000.0, converged=True), PARAMS,
+        )
+
+        assert row["n_steps"] == 0 and np.isnan(row["mean_step_height"])
+        assert steps == []
+
+    def test_no_fit_columns_means_no_intensity(self):
+        from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track
+
+        row, _, _ = analyse_track(_track(np.zeros((20, 3))), PARAMS)
+
+        assert row["n_intensity_points"] == 0
+        assert np.isnan(row["mean_intensity"]) and np.isnan(row["max_intensity"])
+        assert np.isnan(row["n_steps"])
+
+    def test_a_mostly_failed_fit_trace_gives_nan_steps(self):
+        # Review focus: on decon_10 ~75 % of fits fail.
+        from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track
+
+        converged = np.zeros(20, dtype=bool)
+        converged[::4] = True  # 5 of 20
+        values = np.where(converged, 1000.0, np.nan)
+
+        row, _, steps = analyse_track(
+            _track(np.zeros((20, 3)), integrated_intensity=values, converged=converged), PARAMS,
+        )
+
+        assert row["n_intensity_points"] == 5
+        assert np.isnan(row["n_steps"])
+        assert steps == []
+
+
+class TestLifetimeDistribution:
+    def test_counts_uncensored_tracks_only(self):
+        from napari_spotiflow_tracking_nd._track_analysis3d import (
+            LIFETIME_COLUMNS,
+            lifetime_distribution,
+        )
+
+        props = pd.DataFrame({
+            "lifetime_frames": [3, 3, 5, 9],
+            "censored": [False, False, False, True],
+        })
+
+        dist = lifetime_distribution(props, 3.0)
+
+        assert list(dist.columns) == LIFETIME_COLUMNS
+        assert dist["lifetime_frames"].tolist() == [3, 5]
+        assert dist["lifetime_s"].tolist() == [9.0, 15.0]
+        assert dist["count"].tolist() == [2, 1]
+        assert dist["fraction"].tolist() == pytest.approx([2 / 3, 1 / 3])
+
+    def test_all_censored_gives_an_empty_table_with_columns(self):
+        from napari_spotiflow_tracking_nd._track_analysis3d import (
+            LIFETIME_COLUMNS,
+            lifetime_distribution,
+        )
+
+        dist = lifetime_distribution(
+            pd.DataFrame({"lifetime_frames": [4], "censored": [True]}), 3.0,
+        )
+
+        assert dist.empty and list(dist.columns) == LIFETIME_COLUMNS
