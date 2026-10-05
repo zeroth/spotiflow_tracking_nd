@@ -122,17 +122,21 @@ def filter_short_tracks(df: pd.DataFrame, min_length: int) -> pd.DataFrame:
     return df[lengths >= min_length].reset_index(drop=True)
 
 
-def flag_censored(df: pd.DataFrame, first_frame: int, last_frame: int) -> pd.DataFrame:
-    """Add `censored`: True on every row of a track present at
-    `first_frame` or `last_frame`, whose true lifetime is therefore
-    unknown — it may have started before the series or outlived it."""
+def flag_censored(
+    df: pd.DataFrame, first_frame: int, last_frame: int, memory: int = 0,
+) -> pd.DataFrame:
+    """Add `censored`: True on every row of a track that starts within
+    `memory` frames of `first_frame` or ends within `memory` frames of
+    `last_frame`. Its true lifetime is unknown — it may have started before
+    the series or outlived it, and with `memory` > 0 a track missing for up
+    to `memory` frames would still have been continued past the edge."""
     out = df.copy()
     if out.empty:
         out["censored"] = pd.Series(dtype=bool)
         return out
     by_track = out.groupby("particle")["frame"]
     starts, ends = by_track.transform("min"), by_track.transform("max")
-    out["censored"] = (starts <= first_frame) | (ends >= last_frame)
+    out["censored"] = (starts <= first_frame + memory) | (ends >= last_frame - memory)
     return out
 
 

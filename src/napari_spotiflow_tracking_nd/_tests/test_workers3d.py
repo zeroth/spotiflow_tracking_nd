@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -684,3 +685,80 @@ class TestTrackingWorker3D:
         seen = _run_tracking_worker(TrackingWorker3D(src, tmp_path / "t.csv", (8.0, 8.0, 8.0)))
 
         assert "Adaptive search" in seen["errored"][0]
+
+
+    def test_a_track_ending_within_memory_of_the_last_frame_is_censored(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
+
+        src = tmp_path / "spots.csv"
+        # One spot present throughout frames 0-5, one only in frames 2-4:
+        # the second ends one frame before the last.
+        pd.DataFrame({
+            "frame": [0, 1, 2, 3, 4, 5, 2, 3, 4],
+            "z": [5.0] * 6 + [30.0] * 3, "y": [5.0] * 6 + [30.0] * 3, "x": [5.0] * 6 + [30.0] * 3,
+        }).to_csv(src, index=False)
+
+        def _censored(memory):
+            out = tmp_path / f"t{memory}.csv"
+            _run_tracking_worker(TrackingWorker3D(src, out, (2.0, 2.0, 2.0), memory=memory))
+            df = pd.read_csv(out)
+            return df[df["z"] == 30.0]["censored"].all()
+
+        assert not _censored(0)
+        assert _censored(1)
+
+    def test_memory_reaches_linking(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
+
+        src = tmp_path / "gap.csv"
+        # One stationary spot, absent from frame 1.
+        pd.DataFrame({
+            "frame": [0, 2, 3], "z": [5.0] * 3, "y": [5.0] * 3, "x": [5.0] * 3,
+        }).to_csv(src, index=False)
+
+        def _n_tracks(memory):
+            out = tmp_path / f"t{memory}.csv"
+            _run_tracking_worker(TrackingWorker3D(src, out, (2.0, 2.0, 2.0), memory=memory))
+            return pd.read_csv(out)["particle"].nunique()
+
+        assert _n_tracks(0) == 2
+        assert _n_tracks(1) == 1
+
+    def test_use_fit_false_links_on_detected_centres(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
+
+        src = _write_spots_csv(tmp_path / "spots.csv")
+        df = pd.read_csv(src)
+        df["fit_z"], df["fit_y"], df["fit_x"] = df["z"] + 0.1, df["y"] + 0.1, df["x"] + 0.1
+        df["converged"] = True
+        df.to_csv(src, index=False)
+
+        _run_tracking_worker(TrackingWorker3D(src, tmp_path / "fit.csv", (2.0, 4.0, 4.0), use_fit=True))
+        _run_tracking_worker(TrackingWorker3D(src, tmp_path / "det.csv", (2.0, 4.0, 4.0), use_fit=False))
+
+        assert (pd.read_csv(tmp_path / "fit.csv")["coord_source"] == "fit").all()
+        assert (pd.read_csv(tmp_path / "det.csv")["coord_source"] == "detected").all()
+
+    def test_it_records_the_first_and_last_frame_linked(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
+
+        src = _write_spots_csv(tmp_path / "spots.csv", n_frames=10)
+        worker = TrackingWorker3D(src, tmp_path / "t.csv", (2.0, 4.0, 4.0))
+        worker.progress.connect(lambda current, total: worker.cancel() if current == 3 else None)
+
+        _run_tracking_worker(worker)
+
+        assert (worker.first_frame, worker.last_frame) == (0, 2)
+
+    def test_a_failing_cleanup_still_reports_the_error(self, tmp_path, monkeypatch):
+        from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
+
+        def _boom(self, missing_ok=False):
+            raise PermissionError("locked")
+
+        monkeypatch.setattr(Path, "unlink", _boom)
+        src = _write_spots_csv(tmp_path / "spots.csv", n_frames=1)
+
+        seen = _run_tracking_worker(TrackingWorker3D(src, tmp_path / "t.csv", (2.0, 4.0, 4.0)))
+
+        assert "two timepoints" in seen["errored"][0]

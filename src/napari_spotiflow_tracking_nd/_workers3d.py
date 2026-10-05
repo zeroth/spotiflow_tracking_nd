@@ -282,6 +282,11 @@ class TrackingWorker3D(QThread):
         self._adaptive = adaptive
         self._calibration = dict(calibration or {})
         self._cancelled = False
+        # Set by `run()` before `run_finished`: the series' first frame and
+        # the last frame actually linked (earlier than the series' end when
+        # cancelled), so the caller can record how far the run got.
+        self.first_frame: int | None = None
+        self.last_frame: int | None = None
 
     def cancel(self):
         self._cancelled = True
@@ -316,6 +321,8 @@ class TrackingWorker3D(QThread):
                 last_linked = t
                 self.progress.emit(t - first + 1, total)
 
+            self.first_frame, self.last_frame = first, last_linked
+
             if not linked:
                 # Cancelled before a single spot was linked: nothing to
                 # write, and the caller must not mistake an older file of
@@ -325,13 +332,16 @@ class TrackingWorker3D(QThread):
 
             tracks = pd.concat(linked, ignore_index=True)
             tracks = filter_short_tracks(tracks, self._min_length)
-            tracks = flag_censored(tracks, first, last_linked)
+            tracks = flag_censored(tracks, first, last_linked, self._memory)
             tracks = add_physical_columns(tracks, self._calibration)
             tracks.to_csv(partial, index=False)
             os.replace(partial, self._output_path)
             self.run_finished.emit(str(self._output_path))
         except Exception as exc:
-            partial.unlink(missing_ok=True)
+            try:
+                partial.unlink(missing_ok=True)
+            except OSError:
+                pass  # best-effort cleanup must not swallow `errored`
             self.errored.emit(str(exc))
 
 

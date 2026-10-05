@@ -133,6 +133,26 @@ class TestFlagCensored:
         assert flag_censored(df, first_frame=0, last_frame=2)["censored"].all()
         assert not flag_censored(df, first_frame=0, last_frame=9)["censored"].any()
 
+    def test_memory_widens_the_censored_window_at_the_end(self):
+        # With memory=1 a track last seen one frame before the end could
+        # still have been bridged to the end: its lifetime is unknown too.
+        from napari_spotiflow_tracking_nd._tracking3d import flag_censored
+
+        df = _tracked([[0, 3, 5, 5, 5], [0, 4, 5, 5, 5]])
+
+        assert not flag_censored(df, first_frame=0, last_frame=6)["censored"].any()
+        assert not flag_censored(df, first_frame=0, last_frame=6, memory=1)["censored"].any()
+        assert flag_censored(df, first_frame=0, last_frame=5, memory=1)["censored"].all()
+        assert not flag_censored(df, first_frame=0, last_frame=5, memory=0)["censored"].any()
+
+    def test_memory_widens_the_censored_window_at_the_start(self):
+        from napari_spotiflow_tracking_nd._tracking3d import flag_censored
+
+        df = _tracked([[0, 1, 5, 5, 5], [0, 2, 5, 5, 5]])
+
+        assert not flag_censored(df, first_frame=0, last_frame=9, memory=0)["censored"].any()
+        assert flag_censored(df, first_frame=0, last_frame=9, memory=1)["censored"].all()
+
 
 class TestAddPhysicalColumns:
     def test_adds_each_column_only_for_a_known_value(self):
