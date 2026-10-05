@@ -11,6 +11,9 @@ contributions:
     - id: napari-spotiflow-tracking-nd.detection_widget
       python_name: napari_spotiflow_tracking_nd._detection_widget3d:DetectionWidget3D
       title: Spot Detection
+    - id: napari-spotiflow-tracking-nd.tracking_widget
+      python_name: napari_spotiflow_tracking_nd._tracking_widget3d:TrackingWidget3D
+      title: Spot Tracking
   readers:
     # Accepts a folder of per-timepoint 3D TIFFs, or a single file inside
     # one (loads the whole series); declines anything else so napari's
@@ -23,3 +26,5 @@ contributions:
       display_name: Pre-Processing
     - command: napari-spotiflow-tracking-nd.detection_widget
       display_name: Spot Detection
+    - command: napari-spotiflow-tracking-nd.tracking_widget
+      display_name: Spot Tracking
