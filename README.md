@@ -81,10 +81,12 @@ whole-movie-in-RAM) version this plugin is ported from.
   where the fit converged (**Use fitted centres**), the detected centre
   elsewhere; `coord_source` records which. Writes `<name>_tracks.csv` —
   every detection column plus `link_z/y/x`, `particle` (track ID),
-  `censored` (the track touches the first or last frame, so its true
-  lifetime is unknown) and, where calibrated, `z_um, y_um, x_um,
+  `censored` (the track starts or ends within `memory` frames of the
+  first or last frame, so its true lifetime is unknown) and, where calibrated, `z_um, y_um, x_um,
   time_s` — and a `<name>_tracks.json` sidecar with the calibration and
-  every parameter used. Shown as a Tracks layer at the image's scale.
+  every parameter used, plus a `cancelled` flag and the first and last frame
+  linked (so a stopped run is recognisable on disk). Shown as a Tracks layer
+  at the spots layer's scale.
 
 Deferred to later phases: track-property/step analysis, PAPA (not
 planned), N2V denoise, walking average, erosion background removal,

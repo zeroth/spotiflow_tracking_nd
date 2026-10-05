@@ -69,7 +69,8 @@ def choose_link_coordinates(df: pd.DataFrame, use_fit: bool = True) -> pd.DataFr
 def iter_link(df, search_range_zyx, memory, *, adaptive=False,
               should_stop=lambda: False) -> Iterator[tuple[int, pd.DataFrame]]
 def filter_short_tracks(df: pd.DataFrame, min_length: int) -> pd.DataFrame
-def flag_censored(df: pd.DataFrame, first_frame: int, last_frame: int) -> pd.DataFrame
+def flag_censored(df: pd.DataFrame, first_frame: int, last_frame: int,
+                  memory: int = 0) -> pd.DataFrame
 def add_physical_columns(df: pd.DataFrame, calibration: dict) -> pd.DataFrame
 ```
 
@@ -94,8 +95,10 @@ def add_physical_columns(df: pd.DataFrame, calibration: dict) -> pd.DataFrame
   rows. Default 1 — keep everything; short-lived structures are real data
   for lifetime analysis.
 - **`flag_censored`** adds a boolean `censored` column, true on every row
-  of a track that has a row at `first_frame` or `last_frame`: its true
-  lifetime is unknown. `first_frame`/`last_frame` are the detection CSV's
+  of a track that starts at or before `first_frame + memory` or ends at or
+  after `last_frame - memory`: its true lifetime is unknown (with
+  `memory` > 0 a track missing for up to `memory` frames would have been
+  continued past the edge). `first_frame`/`last_frame` are the detection CSV's
   first and last frame (the last frame actually linked, on a cancelled
   run), not the tracks'.
 - **`add_physical_columns`** adds `z_um` (from `link_z × voxel_size_z_um`),
@@ -149,11 +152,15 @@ Files:
 
 - **Tracks CSV**: chosen in a save dialog, defaulting to
   `<detection stem>_tracks.csv` beside the detection CSV. A path equal to
-  the input CSV is refused.
+  the input CSV is refused, as is one whose sidecar would overwrite the
+  detection CSV's sidecar (e.g. `spots.txt` beside `spots.csv`). Typing or
+  pasting an input path re-adopts it like Browse (output path, calibration).
 - **Sidecar** at `calibration_sidecar_path(tracks_csv)`
   (`<stem>_tracks.json`): the calibration used, plus the run parameters —
   `search_range_zyx`, `link_to_calibration`, `memory`, `min_length`,
-  `use_fit`, `adaptive`, `source_csv`, and `trackpy_version` — so the CSV
+  `use_fit`, `adaptive`, `source_csv`, and `trackpy_version` — and the
+  run's extent: `cancelled` (true when stopped early), `first_frame` and
+  `last_frame` (the last frame actually linked) — so the CSV
   can be interpreted and reproduced without the widget. A failed sidecar
   write is a `show_error`; the CSV and layer are kept.
 
@@ -181,8 +188,11 @@ Output layer: a Tracks layer named `<points name> (tracks)` (or
 `<csv stem> (tracks)` when browsed), plus the cancel suffix.
 
 - `data = [particle, frame, link_z, link_y, link_x]`, in pixels.
-- `scale` from `compute_layer_scale` on the calibration fields, falling
-  back to the Points layer's `scale`, so it overlays the image correctly.
+- `scale` is the source Points layer's `scale` when there is one, so the
+  tracks overlay that layer; else `compute_layer_scale` on the calibration
+  fields when xy and z are known; else unit scale. (Typed calibration may
+  describe an image that was opened uncalibrated, which would draw the
+  tracks off it; the CSV's µm columns still use the typed values.)
 - `features`: `coord_source`, `prob`, `censored`, and any fit intensity
   columns present (`amplitude`, `integrated_intensity`, `background`).
 - `metadata`: `tracks_csv_path` and the calibration — for Phase 3.
