@@ -34,6 +34,7 @@ from napari_spotiflow_tracking_nd._segmentation3d import (
     detect_spots_3d,
     load_model,
 )
+from napari_spotiflow_tracking_nd._layer_utils import refresh_layer_combo
 from napari_spotiflow_tracking_nd._run_state import RunStateMixin
 from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D, FunctionWorker3D
 
@@ -206,12 +207,7 @@ class DetectionWidget3D(RunStateMixin, QWidget):
         self._refresh_image_combo()
 
     def _refresh_image_combo(self, event=None):
-        current = self._image_combo.currentText()
-        self._image_combo.clear()
-        names = [l.name for l in self.viewer.layers if isinstance(l, napari.layers.Image)]
-        self._image_combo.addItems(names)
-        if current in names:
-            self._image_combo.setCurrentText(current)
+        refresh_layer_combo(self._image_combo, self.viewer, napari.layers.Image)
 
     def _browse_custom_model(self):
         folder = QFileDialog.getExistingDirectory(self, "Select model checkpoint folder")

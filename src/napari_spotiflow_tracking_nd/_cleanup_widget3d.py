@@ -33,6 +33,7 @@ from napari_spotiflow_tracking_nd._preprocessing3d import (
     gaussian_blur_3d,
     remove_background_high_pass_3d,
 )
+from napari_spotiflow_tracking_nd._layer_utils import refresh_layer_combo
 from napari_spotiflow_tracking_nd._run_state import RunStateMixin
 from napari_spotiflow_tracking_nd._workers3d import FunctionWorker3D, VolumeOpWorker3D
 
@@ -203,12 +204,7 @@ class PreProcessingWidget3D(RunStateMixin, QWidget):
         self._refresh_image_combo()
 
     def _refresh_image_combo(self, event=None):
-        current = self._image_combo.currentText()
-        self._image_combo.clear()
-        names = [l.name for l in self.viewer.layers if isinstance(l, napari.layers.Image)]
-        self._image_combo.addItems(names)
-        if current in names:
-            self._image_combo.setCurrentText(current)
+        refresh_layer_combo(self._image_combo, self.viewer, napari.layers.Image)
 
     # ── Folder browsing ──────────────────────────────────────────────
 
