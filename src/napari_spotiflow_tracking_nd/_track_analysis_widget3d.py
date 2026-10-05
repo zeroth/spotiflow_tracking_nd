@@ -362,12 +362,14 @@ class TrackAnalysisWidget3D(RunStateMixin, QWidget):
     @staticmethod
     def _attach_features(layer, properties: pd.DataFrame):
         """Join the per-track columns onto `layer`'s per-vertex `features`
-        by `track_id`, so napari's colour-by-feature can use them. Columns
-        the layer already has (e.g. `censored`) are left as they are."""
+        by `track_id`, so napari's colour-by-feature can use them. Every
+        analysis column is overwritten, so a re-run replaces the previous
+        run's values; only `track_id` and `censored` (owned by tracking,
+        identical per track) are left as the layer has them."""
         features = layer.features.copy()
         table = properties.set_index("track_id")
         for column in table.columns:
-            if column not in features.columns:
+            if column != "censored":
                 features[column] = features["track_id"].map(table[column]).to_numpy()
         layer.features = features
 

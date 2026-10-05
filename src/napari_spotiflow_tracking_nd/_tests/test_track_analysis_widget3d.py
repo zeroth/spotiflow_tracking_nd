@@ -216,6 +216,29 @@ class TestRun:
         short = features.loc[features["track_id"] == 2, "lifetime_frames"]
         assert (short == 5).all()
 
+    def test_a_rerun_overwrites_the_previous_runs_features(self, analysis_widget, tmp_path):
+        widget, viewer = analysis_widget
+        layer = _add_tracks_layer(viewer, _write_tracks(tmp_path))
+        out = _output_folder(tmp_path)
+        widget._output_dir_edit.setText(str(out))
+        n_vertices = len(layer.data)
+        widget._run_analysis()
+
+        widget._motility_combo.setCurrentText("xy")
+        widget._max_lag_spin.setValue(10)
+        widget._run_analysis()
+
+        features = layer.features
+        assert len(features) == n_vertices
+        second = pd.read_csv(out / "track_properties.csv").set_index("track_id")
+        for column in ("motility_class", "alpha_xy"):
+            expected = features["track_id"].map(second[column])
+            pd.testing.assert_series_equal(
+                features[column].reset_index(drop=True),
+                expected.reset_index(drop=True),
+                check_names=False,
+            )
+
     def test_the_status_reports_the_summary(self, analysis_widget, tmp_path):
         widget, _ = analysis_widget
         widget._set_input_csv(_write_tracks(tmp_path))
