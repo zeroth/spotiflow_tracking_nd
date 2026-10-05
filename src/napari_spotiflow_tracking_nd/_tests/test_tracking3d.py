@@ -169,3 +169,84 @@ class TestAddPhysicalColumns:
         )
 
         assert list(out.columns) == list(df.columns)
+
+
+def _link_all(df, search_range_zyx, memory=0, **kwargs):
+    from napari_spotiflow_tracking_nd._tracking3d import choose_link_coordinates, iter_link
+
+    linked = [
+        frame for _, frame in iter_link(
+            choose_link_coordinates(df), search_range_zyx, memory, **kwargs
+        ) if len(frame)
+    ]
+    return pd.concat(linked, ignore_index=True)
+
+
+class TestIterLink:
+    def test_links_stationary_spots_into_one_track_each(self):
+        df = _spots([[t, 5, 5, 5] for t in range(4)] + [[t, 30, 30, 30] for t in range(4)])
+
+        out = _link_all(df, (2, 2, 2))
+
+        assert out["particle"].nunique() == 2
+        assert len(out) == 8
+
+    def test_an_anisotropic_range_rejects_a_z_jump_an_isotropic_one_accepts(self):
+        # 3 z-voxels per frame is ~0.63 µm at 0.210 µm/z-voxel: within an
+        # isotropic 4-voxel range, but beyond the (1.98, 4, 4) range that
+        # matches a 4-pixel xy range in µm.
+        df = _spots([[t, 10 + 3 * t, 20, 20] for t in range(4)])
+
+        assert _link_all(df, (4, 4, 4))["particle"].nunique() == 1
+        assert _link_all(df, (1.98, 4, 4))["particle"].nunique() == 4
+
+    def test_memory_counts_frames_not_iterations(self):
+        # Review focus: frame 2 has no spots at all. trackpy counts memory
+        # in frames it is fed, so skipping frame 2 would let memory=0
+        # bridge the gap.
+        df = _spots([[t, 5, 5, 5] for t in (0, 1, 3, 4)])
+
+        assert _link_all(df, (2, 2, 2), memory=0)["particle"].nunique() == 2
+        assert _link_all(df, (2, 2, 2), memory=1)["particle"].nunique() == 1
+
+    def test_yields_every_frame_including_empty_ones(self):
+        from napari_spotiflow_tracking_nd._tracking3d import choose_link_coordinates, iter_link
+
+        df = choose_link_coordinates(_spots([[t, 5, 5, 5] for t in (2, 3, 5)]))
+
+        assert [t for t, _ in iter_link(df, (2, 2, 2), 1)] == [2, 3, 4, 5]
+
+    def test_should_stop_ends_between_frames(self):
+        from napari_spotiflow_tracking_nd._tracking3d import choose_link_coordinates, iter_link
+
+        df = choose_link_coordinates(_spots([[t, 5, 5, 5] for t in range(10)]))
+        seen = []
+
+        for t, _ in iter_link(df, (2, 2, 2), 0, should_stop=lambda: len(seen) >= 3):
+            seen.append(t)
+
+        assert seen == [0, 1, 2]
+
+    def test_a_dense_region_raises_a_plain_message(self):
+        rng = np.random.default_rng(0)
+        df = _spots(np.column_stack([
+            np.repeat([0, 1], 100),
+            rng.uniform(0, 5, 200), rng.uniform(0, 10, 200), rng.uniform(0, 10, 200),
+        ]))
+
+        with pytest.raises(ValueError, match="Adaptive search"):
+            _link_all(df, (8, 8, 8))
+
+    def test_adaptive_search_resolves_the_dense_region(self):
+        rng = np.random.default_rng(0)
+        df = _spots(np.column_stack([
+            np.repeat([0, 1], 100),
+            rng.uniform(0, 5, 200), rng.uniform(0, 10, 200), rng.uniform(0, 10, 200),
+        ]))
+
+        assert len(_link_all(df, (8, 8, 8), adaptive=True)) == 200
+
+    def test_float_frame_numbers_from_an_older_csv_still_link(self):
+        df = _spots([[t, 5, 5, 5] for t in range(3)]).astype({"frame": float})
+
+        assert _link_all(df, (2, 2, 2))["particle"].nunique() == 1

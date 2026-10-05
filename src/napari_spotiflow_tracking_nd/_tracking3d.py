@@ -8,8 +8,12 @@ never by rewriting the coordinates linking used.
 """
 from __future__ import annotations
 
+from typing import Callable, Iterator
+
 import numpy as np
 import pandas as pd
+import trackpy as tp
+from trackpy.linking import SubnetOversizeException
 
 #: Columns a detection CSV must have to be linked.
 REQUIRED_COLUMNS = ("frame", "z", "y", "x")
@@ -47,6 +51,67 @@ def choose_link_coordinates(df: pd.DataFrame, use_fit: bool = True) -> pd.DataFr
         out[name] = coords[:, i]
     out["coord_source"] = source
     return out
+
+
+def iter_link(
+    df: pd.DataFrame,
+    search_range_zyx: tuple[float, float, float],
+    memory: int,
+    *,
+    adaptive: bool = False,
+    should_stop: Callable[[], bool] = lambda: False,
+) -> Iterator[tuple[int, pd.DataFrame]]:
+    """Link `df` (with `LINK_COLUMNS`) frame by frame, yielding
+    `(frame, linked_rows)` for every frame from the first to the last.
+
+    Frames with no spots are fed to trackpy as empty frames rather than
+    skipped: trackpy counts `memory` in frames *it has seen*, so skipping
+    one would let a track bridge a gap `memory` should have broken.
+
+    `should_stop` is checked before each frame; returning True ends the
+    iteration cleanly after the frames already yielded.
+
+    Raises:
+        ValueError: a region is too dense to link at this search range
+            (trackpy's `SubnetOversizeException`), with what to change.
+    """
+    frames = df["frame"].astype(int)
+    groups = {int(t): g for t, g in df.groupby(frames, sort=True)}
+    if not groups:
+        return
+    first, last = min(groups), max(groups)
+    empty = df.iloc[0:0]
+    order = range(first, last + 1)
+
+    def _feed():
+        for t in order:
+            if should_stop():
+                return
+            yield groups.get(t, empty)
+
+    search_range = tuple(float(v) for v in search_range_zyx)
+    kwargs = {}
+    if adaptive:
+        kwargs = {"adaptive_stop": 0.1 * min(search_range), "adaptive_step": 0.95}
+
+    # trackpy otherwise logs a line per frame — 349 of them per run.
+    tp.quiet()
+    try:
+        linked = tp.link_df_iter(
+            _feed(),
+            search_range=search_range,
+            memory=memory,
+            pos_columns=list(LINK_COLUMNS),
+            t_column="frame",
+            **kwargs,
+        )
+        for t, frame_df in zip(order, linked):
+            yield t, frame_df
+    except SubnetOversizeException as exc:
+        raise ValueError(
+            "Too many candidate links in a dense region to solve at this "
+            "search range — lower the search range, or tick Adaptive search."
+        ) from exc
 
 
 def filter_short_tracks(df: pd.DataFrame, min_length: int) -> pd.DataFrame:
