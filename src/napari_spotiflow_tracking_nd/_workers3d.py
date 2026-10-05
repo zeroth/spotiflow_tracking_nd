@@ -24,6 +24,8 @@ from napari_spotiflow_tracking_nd._track_analysis3d import (
     STEP_COLUMNS,
     AnalysisParams,
     analyse_track,
+    holds_only_result_files,
+    is_results_folder,
     lifetime_distribution,
 )
 from napari_spotiflow_tracking_nd._track_analysis3d import (
@@ -358,16 +360,39 @@ class TrackingWorker3D(QThread):
             self.errored.emit(str(exc))
 
 
+def refuse_unless_results_folder(path: Path) -> None:
+    """Raise `ValueError` if `path` exists and is not recognisably an
+    earlier run's results folder — anything else might be the user's data."""
+    if path.exists() and not is_results_folder(path):
+        raise ValueError(
+            f"{path} is not an earlier Track Analysis results folder — "
+            "refusing to replace it."
+        )
+
+
 def replace_dir(src: Path, dst: Path) -> None:
     """Move the finished folder `src` to `dst`, replacing any earlier `dst`
     only once `src` is complete — so a failed run can never leave `dst`
-    half old, half new."""
+    half old, half new.
+
+    Only an earlier results folder (`is_results_folder`) is ever replaced
+    or deleted, at `dst` or at the `<dst>.old` a crashed swap may have left;
+    anything else raises `ValueError` before a single file is moved.
+    """
     old = dst.with_name(dst.name + ".old")
+    refuse_unless_results_folder(old)
+    refuse_unless_results_folder(dst)
     if old.exists():
         shutil.rmtree(old)
-    if dst.exists():
-        os.replace(dst, old)
-    os.replace(src, dst)
+    if not dst.exists():
+        os.replace(src, dst)
+        return
+    os.replace(dst, old)
+    try:
+        os.replace(src, dst)
+    except BaseException:
+        os.replace(old, dst)  # put the earlier results back
+        raise
     shutil.rmtree(old, ignore_errors=True)
 
 
@@ -407,6 +432,7 @@ class TrackAnalysisWorker3D(QThread):
 
     def run(self):
         partial = self._output_dir.with_name(self._output_dir.name + ".partial")
+        made_partial = False
         try:
             tracks = pd.read_csv(self._csv_path)
             missing = missing_track_columns(tracks)
@@ -417,6 +443,9 @@ class TrackAnalysisWorker3D(QThread):
                 )
             if tracks.empty:
                 raise ValueError(f"{self._csv_path.name} has no tracks.")
+            # Refuse a folder that cannot be replaced now, not after the
+            # user has waited for every track.
+            self._check_output_dir(partial)
 
             groups = [group for _, group in tracks.groupby("particle", sort=True)]
             properties, msd_rows, step_rows = [], [], []
@@ -431,9 +460,11 @@ class TrackAnalysisWorker3D(QThread):
                 self.progress.emit(i + 1, len(groups))
 
             table = pd.DataFrame(properties, columns=PROPERTY_COLUMNS)
+            self._check_output_dir(partial)
             if partial.exists():
-                shutil.rmtree(partial)
+                shutil.rmtree(partial)  # a crashed run's staging folder
             partial.mkdir(parents=True)
+            made_partial = True
             table.to_csv(partial / "track_properties.csv", index=False)
             lifetime_distribution(table, self._params.frame_interval_s).to_csv(
                 partial / "lifetime_distribution.csv", index=False
@@ -450,8 +481,26 @@ class TrackAnalysisWorker3D(QThread):
             replace_dir(partial, self._output_dir)
             self.run_finished.emit(str(self._output_dir))
         except Exception as exc:
-            shutil.rmtree(partial, ignore_errors=True)
+            # Only the staging folder this run made; a refused stale one
+            # is left as found.
+            if made_partial:
+                shutil.rmtree(partial, ignore_errors=True)
             self.errored.emit(str(exc))
+
+    def _check_output_dir(self, partial: Path) -> None:
+        """Raise `ValueError` unless the results folder, its `.old` and
+        `partial` are each absent or safe to delete: an earlier results
+        folder, or (for `partial`, this worker's own staging folder) one
+        holding nothing but result files."""
+        refuse_unless_results_folder(self._output_dir)
+        refuse_unless_results_folder(
+            self._output_dir.with_name(self._output_dir.name + ".old")
+        )
+        if partial.exists() and not holds_only_result_files(partial):
+            raise ValueError(
+                f"{partial} holds more than Track Analysis results — "
+                "refusing to delete it."
+            )
 
 
 class FunctionWorker3D(QThread):

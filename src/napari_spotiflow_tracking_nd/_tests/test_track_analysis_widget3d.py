@@ -163,6 +163,49 @@ class TestRefusals:
         assert target.read_text() == "precious"
         assert sorted(p.name for p in target.parent.iterdir()) == ["results.csv"]
 
+    def test_an_existing_folder_that_is_not_results_is_refused_untouched(
+        self, analysis_widget, tmp_path, monkeypatch
+    ):
+        # Review focus (data loss): e.g. the experiment folder picked by Browse.
+        from napari_spotiflow_tracking_nd import _track_analysis_widget3d
+
+        errors = []
+        monkeypatch.setattr(_track_analysis_widget3d, "show_error", errors.append)
+        widget, _ = analysis_widget
+        widget._set_input_csv(_write_tracks(tmp_path / "tracks"))
+        experiment = tmp_path / "experiment"
+        (experiment / "raw").mkdir(parents=True)
+        (experiment / "raw" / "vol.tif").write_text("raw data")
+        (experiment / "notes.txt").write_text("notes")
+        widget._output_dir_edit.setText(str(experiment))
+
+        widget._run_analysis()
+
+        assert len(errors) == 1 and "not an earlier results folder" in errors[0]
+        assert not widget._is_running
+        assert sorted(p.relative_to(experiment).as_posix() for p in experiment.rglob("*")) == [
+            "notes.txt", "raw", "raw/vol.tif",
+        ]
+        assert (experiment / "raw" / "vol.tif").read_text() == "raw data"
+
+    def test_a_folder_above_the_tracks_csv_is_refused(self, analysis_widget, tmp_path, monkeypatch):
+        from napari_spotiflow_tracking_nd import _track_analysis_widget3d
+
+        errors = []
+        monkeypatch.setattr(_track_analysis_widget3d, "show_error", errors.append)
+        widget, _ = analysis_widget
+        csv = _write_tracks(tmp_path / "experiment" / "tracks")
+        widget._set_input_csv(csv)
+        widget._output_dir_edit.setText(str(tmp_path / "experiment"))
+
+        widget._run_analysis()
+
+        assert len(errors) == 1 and "tracks CSV" in errors[0]
+        assert not widget._is_running
+        assert sorted(p.name for p in csv.parent.iterdir()) == [
+            "spots_tracks.csv", "spots_tracks.json",
+        ]
+
     def test_a_missing_tracks_csv_is_refused(self, analysis_widget, tmp_path):
         widget, _ = analysis_widget
         csv = _write_tracks(tmp_path)

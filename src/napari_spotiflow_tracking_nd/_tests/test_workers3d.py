@@ -799,6 +799,24 @@ RESULT_FILES = [
     "steps.csv", "track_properties.csv",
 ]
 
+#: An earlier run's results folder, as `_earlier_results_folder` writes it.
+EARLIER_RESULTS = {"analysis.json": '{"earlier": true}', "steps.csv": "earlier"}
+
+
+def _earlier_results_folder(folder):
+    folder.mkdir()
+    for name, text in EARLIER_RESULTS.items():
+        (folder / name).write_text(text)
+    return folder
+
+
+def _contents(folder):
+    """`{relative path: text}` of every file under `folder`."""
+    return {
+        p.relative_to(folder).as_posix(): p.read_text()
+        for p in sorted(folder.rglob("*")) if p.is_file()
+    }
+
 
 class TestTrackAnalysisWorker3D:
     def test_writes_the_results_folder_and_reports_progress_per_track(self, tmp_path):
@@ -839,13 +857,13 @@ class TestTrackAnalysisWorker3D:
         from napari_spotiflow_tracking_nd._workers3d import TrackAnalysisWorker3D
 
         src = _write_tracks_csv(tmp_path / "t.csv")
-        out = tmp_path / "res"
-        out.mkdir()
-        (out / "stale.csv").write_text("from an earlier run")
+        out = _earlier_results_folder(tmp_path / "res")
 
-        _run_analysis_worker(TrackAnalysisWorker3D(src, out, _analysis_params()))
+        seen = _run_analysis_worker(TrackAnalysisWorker3D(src, out, _analysis_params()))
 
+        assert seen["errored"] == []
         assert sorted(p.name for p in out.iterdir()) == RESULT_FILES
+        assert (out / "analysis.json").read_text() == "{}"
         assert sorted(p.name for p in tmp_path.iterdir()) == ["res", "t.csv"]
 
     def test_cancel_writes_nothing(self, tmp_path):
@@ -866,15 +884,14 @@ class TestTrackAnalysisWorker3D:
         from napari_spotiflow_tracking_nd._workers3d import TrackAnalysisWorker3D
 
         src = _write_tracks_csv(tmp_path / "t.csv")
-        out = tmp_path / "res"
-        out.mkdir()
-        (out / "earlier.csv").write_text("keep me")
+        out = _earlier_results_folder(tmp_path / "res")
         worker = TrackAnalysisWorker3D(src, out, _analysis_params())
         worker.cancel()
 
-        _run_analysis_worker(worker)
+        seen = _run_analysis_worker(worker)
 
-        assert (out / "earlier.csv").read_text() == "keep me"
+        assert seen["finished"] == [""]
+        assert _contents(out) == EARLIER_RESULTS
 
     def test_missing_columns_are_refused_by_name_and_earlier_output_kept(self, tmp_path):
         from napari_spotiflow_tracking_nd._workers3d import TrackAnalysisWorker3D
@@ -903,3 +920,177 @@ class TestTrackAnalysisWorker3D:
 
         assert "no tracks" in seen["errored"][0]
         assert not (tmp_path / "res").exists()
+
+    def test_an_existing_folder_that_is_not_results_is_refused_untouched(self, tmp_path):
+        # Review focus (data loss): picking e.g. the experiment folder as the
+        # results folder must never move or delete what is in it.
+        from napari_spotiflow_tracking_nd._workers3d import TrackAnalysisWorker3D
+
+        src = _write_tracks_csv(tmp_path / "t.csv")
+        out = tmp_path / "experiment"
+        (out / "raw").mkdir(parents=True)
+        (out / "raw" / "vol.tif").write_text("raw data")
+        (out / "notes.txt").write_text("notes")
+        before = _contents(out)
+
+        seen = _run_analysis_worker(TrackAnalysisWorker3D(src, out, _analysis_params()))
+
+        assert len(seen["errored"]) == 1
+        assert "not an earlier Track Analysis results folder" in seen["errored"][0]
+        # Refused before analysing, not after.
+        assert seen["progress"] == []
+        assert _contents(out) == before
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["experiment", "t.csv"]
+
+    def test_a_results_folder_with_anything_else_in_it_is_refused(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import TrackAnalysisWorker3D
+
+        src = _write_tracks_csv(tmp_path / "t.csv")
+        out = _earlier_results_folder(tmp_path / "res")
+        (out / "my_plot.png").write_text("keep me")
+        before = _contents(out)
+
+        seen = _run_analysis_worker(TrackAnalysisWorker3D(src, out, _analysis_params()))
+
+        assert len(seen["errored"]) == 1
+        assert _contents(out) == before
+
+    def test_a_stale_old_folder_that_is_not_results_is_refused_untouched(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import TrackAnalysisWorker3D
+
+        src = _write_tracks_csv(tmp_path / "t.csv")
+        out = _earlier_results_folder(tmp_path / "res")
+        old = tmp_path / "res.old"
+        old.mkdir()
+        (old / "notes.txt").write_text("notes")
+
+        seen = _run_analysis_worker(TrackAnalysisWorker3D(src, out, _analysis_params()))
+
+        assert len(seen["errored"]) == 1
+        assert "res.old" in seen["errored"][0]
+        assert _contents(old) == {"notes.txt": "notes"}
+        assert _contents(out) == EARLIER_RESULTS
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["res", "res.old", "t.csv"]
+
+    def test_a_stale_partial_folder_that_is_not_results_is_refused_untouched(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import TrackAnalysisWorker3D
+
+        src = _write_tracks_csv(tmp_path / "t.csv")
+        out = tmp_path / "res"
+        partial = tmp_path / "res.partial"
+        partial.mkdir()
+        (partial / "notes.txt").write_text("notes")
+
+        seen = _run_analysis_worker(TrackAnalysisWorker3D(src, out, _analysis_params()))
+
+        assert len(seen["errored"]) == 1
+        assert "res.partial" in seen["errored"][0]
+        assert seen["progress"] == []
+        assert _contents(partial) == {"notes.txt": "notes"}
+        assert not out.exists()
+
+    def test_stale_results_only_old_and_partial_folders_are_cleaned_up(self, tmp_path):
+        # Left behind by a crash mid-swap or mid-write.
+        from napari_spotiflow_tracking_nd._workers3d import TrackAnalysisWorker3D
+
+        src = _write_tracks_csv(tmp_path / "t.csv")
+        out = _earlier_results_folder(tmp_path / "res")
+        _earlier_results_folder(tmp_path / "res.old")
+        partial = tmp_path / "res.partial"
+        partial.mkdir()
+        (partial / "steps.csv").write_text("half written")
+
+        seen = _run_analysis_worker(TrackAnalysisWorker3D(src, out, _analysis_params()))
+
+        assert seen["errored"] == []
+        assert sorted(p.name for p in out.iterdir()) == RESULT_FILES
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["res", "t.csv"]
+
+    def test_an_error_mid_analysis_keeps_an_earlier_results_folder(self, tmp_path, monkeypatch):
+        from napari_spotiflow_tracking_nd import _workers3d
+        from napari_spotiflow_tracking_nd._workers3d import TrackAnalysisWorker3D
+
+        real_analyse_track = _workers3d.analyse_track
+        calls = []
+
+        def _fail_on_second(track, params):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("boom")
+            return real_analyse_track(track, params)
+
+        monkeypatch.setattr(_workers3d, "analyse_track", _fail_on_second)
+        src = _write_tracks_csv(tmp_path / "t.csv")
+        out = _earlier_results_folder(tmp_path / "res")
+
+        seen = _run_analysis_worker(TrackAnalysisWorker3D(src, out, _analysis_params()))
+
+        assert seen["errored"] == ["boom"]
+        assert _contents(out) == EARLIER_RESULTS
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["res", "t.csv"]
+
+
+class TestReplaceDir:
+    @staticmethod
+    def _finished(folder):
+        folder.mkdir()
+        (folder / "analysis.json").write_text("new")
+        return folder
+
+    def test_a_missing_destination_is_created(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import replace_dir
+
+        replace_dir(self._finished(tmp_path / "res.partial"), tmp_path / "res")
+
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["res"]
+        assert (tmp_path / "res" / "analysis.json").read_text() == "new"
+
+    def test_an_earlier_results_folder_is_replaced(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import replace_dir
+
+        out = _earlier_results_folder(tmp_path / "res")
+
+        replace_dir(self._finished(tmp_path / "res.partial"), out)
+
+        assert _contents(out) == {"analysis.json": "new"}
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["res"]
+
+    @pytest.mark.parametrize("make", ["folder", "file"])
+    def test_anything_else_is_refused_untouched(self, tmp_path, make):
+        from napari_spotiflow_tracking_nd._workers3d import replace_dir
+
+        out = tmp_path / "res"
+        if make == "folder":
+            out.mkdir()
+            (out / "data.csv").write_text("precious")
+        else:
+            out.write_text("precious")
+        src = self._finished(tmp_path / "res.partial")
+
+        with pytest.raises(ValueError, match="refusing to replace"):
+            replace_dir(src, out)
+
+        assert (out / "data.csv" if make == "folder" else out).read_text() == "precious"
+        assert (src / "analysis.json").exists()
+
+    def test_a_failed_swap_puts_the_earlier_folder_back(self, tmp_path, monkeypatch):
+        import os
+
+        from napari_spotiflow_tracking_nd._workers3d import replace_dir
+
+        out = _earlier_results_folder(tmp_path / "res")
+        src = self._finished(tmp_path / "res.partial")
+        real_replace = os.replace
+
+        def _replace(a, b):
+            if Path(a) == src:
+                raise OSError("disk full")
+            return real_replace(a, b)
+
+        monkeypatch.setattr(os, "replace", _replace)
+
+        with pytest.raises(OSError, match="disk full"):
+            replace_dir(src, out)
+
+        assert _contents(out) == EARLIER_RESULTS
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["res", "res.partial"]

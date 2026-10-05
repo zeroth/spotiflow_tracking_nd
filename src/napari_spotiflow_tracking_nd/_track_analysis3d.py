@@ -9,6 +9,7 @@ and 0.210 µm axial steps and means nothing.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -143,6 +144,32 @@ STEP_COLUMNS = [
     "step_height", "dwell_before", "dwell_after",
 ]
 LIFETIME_COLUMNS = ["lifetime_frames", "lifetime_s", "count", "fraction"]
+
+#: Everything a results folder holds — and all a run may ever replace.
+RESULT_FILES = (
+    "track_properties.csv", "lifetime_distribution.csv", "msd_curves.csv",
+    "steps.csv", "analysis.json",
+)
+
+
+def holds_only_result_files(path) -> bool:
+    """True when `path` is a real folder (not a link) whose every entry is
+    a regular file named in `RESULT_FILES` — nothing else, no subfolders.
+    An empty folder qualifies."""
+    path = Path(path)
+    if path.is_symlink() or not path.is_dir():
+        return False
+    return all(
+        entry.name in RESULT_FILES and entry.is_file() and not entry.is_symlink()
+        for entry in path.iterdir()
+    )
+
+
+def is_results_folder(path) -> bool:
+    """True only for a folder that is recognisably an earlier run's
+    results: `analysis.json` plus nothing but other `RESULT_FILES`. The
+    one kind of existing folder a run may delete."""
+    return holds_only_result_files(path) and (Path(path) / "analysis.json").is_file()
 
 
 def find_steps(data, window: int = 20, threshold: float = 0.5):

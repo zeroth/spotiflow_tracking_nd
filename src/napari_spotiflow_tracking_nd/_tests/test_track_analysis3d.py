@@ -317,6 +317,42 @@ class TestAnalyseTrackIntensity:
         assert steps == []
 
 
+class TestIsResultsFolder:
+    def _folder(self, tmp_path, *names):
+        folder = tmp_path / "res"
+        folder.mkdir(parents=True)
+        for name in names:
+            (folder / name).write_text("x")
+        return folder
+
+    def test_a_full_or_partial_set_of_result_files_with_the_record(self, tmp_path):
+        from napari_spotiflow_tracking_nd._track_analysis3d import RESULT_FILES, is_results_folder
+
+        assert is_results_folder(self._folder(tmp_path, *RESULT_FILES))
+        assert is_results_folder(self._folder(tmp_path / "a", "analysis.json"))
+
+    @pytest.mark.parametrize("names", [
+        (),                                          # empty
+        ("track_properties.csv", "steps.csv"),       # no analysis.json
+        ("analysis.json", "notes.txt"),              # something else beside it
+    ])
+    def test_anything_else_is_not(self, tmp_path, names):
+        from napari_spotiflow_tracking_nd._track_analysis3d import is_results_folder
+
+        assert not is_results_folder(self._folder(tmp_path, *names))
+
+    def test_a_subfolder_a_file_or_nothing_is_not(self, tmp_path):
+        from napari_spotiflow_tracking_nd._track_analysis3d import is_results_folder
+
+        folder = self._folder(tmp_path, "analysis.json")
+        (folder / "raw").mkdir()
+        (tmp_path / "f.txt").write_text("x")
+
+        assert not is_results_folder(folder)
+        assert not is_results_folder(tmp_path / "f.txt")
+        assert not is_results_folder(tmp_path / "missing")
+
+
 class TestLifetimeDistribution:
     def test_counts_uncensored_tracks_only(self):
         from napari_spotiflow_tracking_nd._track_analysis3d import (

@@ -29,7 +29,7 @@ from napari_spotiflow_tracking_nd import __version__ as PLUGIN_VERSION
 from napari_spotiflow_tracking_nd._detection_widget3d import CALIBRATION_KEYS
 from napari_spotiflow_tracking_nd._layer_utils import calibration_spin, refresh_layer_combo
 from napari_spotiflow_tracking_nd._run_state import RunStateMixin
-from napari_spotiflow_tracking_nd._track_analysis3d import AnalysisParams
+from napari_spotiflow_tracking_nd._track_analysis3d import AnalysisParams, is_results_folder
 from napari_spotiflow_tracking_nd._tracking_widget3d import (
     read_sidecar,
     read_sidecar_calibration,
@@ -45,6 +45,13 @@ def default_analysis_dir(csv_path) -> Path:
     """`spots_tracks.csv` -> `spots_tracks_analysis/`, beside it."""
     path = Path(csv_path)
     return path.with_name(f"{path.stem}_analysis")
+
+
+def is_same_or_above(folder, path) -> bool:
+    """True when `folder` is `path` or one of its ancestors — after
+    resolving `..` and, on Windows, ignoring case."""
+    folder, path = Path(folder).resolve(), Path(path).resolve()
+    return folder == path or folder in path.parents
 
 
 def summarise(properties: pd.DataFrame) -> str:
@@ -302,14 +309,22 @@ class TrackAnalysisWidget3D(RunStateMixin, QWidget):
             show_error("No results folder selected.")
             return
         out_dir = Path(out_text)
-        if same_file(out_dir, csv_path.parent):
+        if is_same_or_above(out_dir, csv_path.parent):
             show_error(
-                "The results folder would be the tracks CSV's own folder — "
-                "pick a different one."
+                "The results folder would be the tracks CSV's own folder or "
+                "one above it — pick a different one."
             )
             return
         if out_dir.exists() and not out_dir.is_dir():
             show_error(f"{out_dir} is a file, not a folder — pick a different results folder.")
+            return
+        # A run replaces the whole folder, so only an earlier run's results
+        # may be there; the worker refuses anything else too.
+        if out_dir.is_dir() and not is_results_folder(out_dir):
+            show_error(
+                f"{out_dir} already exists and is not an earlier results "
+                "folder — pick a new folder name."
+            )
             return
         params = self._params()
         if params is None:
