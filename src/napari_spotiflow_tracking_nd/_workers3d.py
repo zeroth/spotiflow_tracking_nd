@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -15,6 +16,14 @@ from napari_spotiflow_tracking_nd._fitting3d import (
     paint_label_mask,
 )
 from napari_spotiflow_tracking_nd._segmentation3d import detect_spots_3d
+from napari_spotiflow_tracking_nd._tracking3d import (
+    add_physical_columns,
+    choose_link_coordinates,
+    filter_short_tracks,
+    flag_censored,
+    iter_link,
+    missing_columns,
+)
 
 
 class VolumeOpWorker3D(QThread):
@@ -229,6 +238,101 @@ class DetectionWorker3D(QThread):
                 converged=np.array([f.converged for f in fits]),
             )
         return pd.DataFrame(columns)
+
+
+class TrackingWorker3D(QThread):
+    """Link a detection CSV into tracks, one frame at a time, and write
+    the tracks CSV once linking is done.
+
+    Written once at the end, not appended per frame like detection: the
+    min-length filter and the `censored` flag both need each track whole.
+    It goes to a `.partial` file first and is renamed into place, so a
+    failed run never leaves a valid-looking half table — nor destroys a
+    previous run's output under the same name.
+
+    Cancellation (`cancel()`) is checked between frames. The frames linked
+    so far are still filtered, flagged and written, with the last frame
+    linked treated as the end of the series.
+    """
+
+    progress = Signal(int, int)  # (current, total), 1-indexed current
+    # `run_finished`, not `finished` — see `VolumeOpWorker3D` for why.
+    run_finished = Signal(str)   # the tracks CSV written, or "" if none
+    errored = Signal(str)
+
+    def __init__(
+        self,
+        csv_path: Path,
+        output_path: Path,
+        search_range_zyx: tuple[float, float, float],
+        memory: int = 3,
+        min_length: int = 1,
+        use_fit: bool = True,
+        adaptive: bool = False,
+        calibration: dict | None = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._csv_path = Path(csv_path)
+        self._output_path = Path(output_path)
+        self._search_range_zyx = tuple(search_range_zyx)
+        self._memory = memory
+        self._min_length = min_length
+        self._use_fit = use_fit
+        self._adaptive = adaptive
+        self._calibration = dict(calibration or {})
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        partial = self._output_path.with_name(self._output_path.name + ".partial")
+        try:
+            spots = pd.read_csv(self._csv_path)
+            missing = missing_columns(spots)
+            if missing:
+                raise ValueError(
+                    f"{self._csv_path.name} is not a detection CSV — missing "
+                    f"column(s): {', '.join(missing)}."
+                )
+            if spots["frame"].nunique() < 2:
+                raise ValueError(
+                    "Spots are needed in at least two timepoints to link "
+                    "anything into tracks."
+                )
+            spots = choose_link_coordinates(spots, use_fit=self._use_fit)
+
+            first = int(spots["frame"].min())
+            total = int(spots["frame"].max()) - first + 1
+            linked, last_linked = [], None
+            for t, frame_df in iter_link(
+                spots, self._search_range_zyx, self._memory,
+                adaptive=self._adaptive,
+                should_stop=lambda: self._cancelled,
+            ):
+                if len(frame_df):
+                    linked.append(frame_df)
+                last_linked = t
+                self.progress.emit(t - first + 1, total)
+
+            if not linked:
+                # Cancelled before a single spot was linked: nothing to
+                # write, and the caller must not mistake an older file of
+                # the same name for this run's output.
+                self.run_finished.emit("")
+                return
+
+            tracks = pd.concat(linked, ignore_index=True)
+            tracks = filter_short_tracks(tracks, self._min_length)
+            tracks = flag_censored(tracks, first, last_linked)
+            tracks = add_physical_columns(tracks, self._calibration)
+            tracks.to_csv(partial, index=False)
+            os.replace(partial, self._output_path)
+            self.run_finished.emit(str(self._output_path))
+        except Exception as exc:
+            partial.unlink(missing_ok=True)
+            self.errored.emit(str(exc))
 
 
 class FunctionWorker3D(QThread):

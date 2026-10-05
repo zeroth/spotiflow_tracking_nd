@@ -529,3 +529,158 @@ class TestMaskSeriesDtypeIsRunWide:
 
         stack, _ = load_folder_as_lazy_stack(tmp_path / "masks")  # must not raise
         assert stack.shape[0] == 2
+
+
+def _write_spots_csv(path, n_frames=5):
+	"""Two stationary spots per frame, far apart."""
+	rows = []
+	for t in range(n_frames):
+		rows.append({"frame": t, "z": 5.0, "y": 10.0, "x": 10.0, "prob": 0.9})
+		rows.append({"frame": t, "z": 20.0, "y": 40.0, "x": 40.0, "prob": 0.8})
+	pd.DataFrame(rows).to_csv(path, index=False)
+	return path
+
+
+def _run_tracking_worker(worker):
+	seen = {"progress": [], "finished": [], "errored": []}
+	worker.progress.connect(lambda c, t: seen["progress"].append((c, t)))
+	worker.run_finished.connect(seen["finished"].append)
+	worker.errored.connect(seen["errored"].append)
+	worker.run()
+	return seen
+
+
+class TestTrackingWorker3D:
+	def test_writes_a_tracks_csv_and_reports_progress_per_frame(self, tmp_path):
+		from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
+
+		src = _write_spots_csv(tmp_path / "spots.csv")
+		out = tmp_path / "spots_tracks.csv"
+
+		seen = _run_tracking_worker(TrackingWorker3D(src, out, (2.0, 4.0, 4.0)))
+
+		assert seen["errored"] == []
+		assert seen["progress"] == [(i, 5) for i in range(1, 6)]
+		assert seen["finished"] == [str(out)]
+		df = pd.read_csv(out)
+		assert df["particle"].nunique() == 2
+		for column in ("frame", "z", "y", "x", "prob", "link_z", "link_y", "link_x",
+		               "coord_source", "particle", "censored"):
+			assert column in df.columns, f"missing {column}"
+
+	def test_no_partial_file_is_left_behind(self, tmp_path):
+		from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
+
+		src = _write_spots_csv(tmp_path / "spots.csv")
+		out = tmp_path / "t.csv"
+
+		_run_tracking_worker(TrackingWorker3D(src, out, (2.0, 4.0, 4.0)))
+
+		assert sorted(p.name for p in tmp_path.iterdir()) == ["spots.csv", "t.csv"]
+
+	def test_calibration_adds_physical_columns(self, tmp_path):
+		from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
+
+		src = _write_spots_csv(tmp_path / "spots.csv")
+		out = tmp_path / "t.csv"
+		calibration = {"pixel_size_xy_um": 0.104, "voxel_size_z_um": 0.210, "frame_interval_s": 3.0}
+
+		_run_tracking_worker(TrackingWorker3D(src, out, (2.0, 4.0, 4.0), calibration=calibration))
+
+		df = pd.read_csv(out)
+		assert {"z_um", "y_um", "x_um", "time_s"} <= set(df.columns)
+		assert df["time_s"].max() == pytest.approx(12.0)
+
+	def test_min_length_drops_short_tracks(self, tmp_path):
+		from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
+
+		src = tmp_path / "spots.csv"
+		pd.DataFrame({
+			"frame": [0, 1, 2, 1],
+			"z": [5.0, 5.0, 5.0, 30.0], "y": [5.0, 5.0, 5.0, 30.0], "x": [5.0, 5.0, 5.0, 30.0],
+		}).to_csv(src, index=False)
+		out = tmp_path / "t.csv"
+
+		_run_tracking_worker(TrackingWorker3D(src, out, (2.0, 2.0, 2.0), min_length=2))
+
+		assert len(pd.read_csv(out)) == 3
+
+	def test_cancel_writes_the_frames_linked_so_far_flagged_censored(self, tmp_path):
+		from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
+
+		src = _write_spots_csv(tmp_path / "spots.csv", n_frames=10)
+		out = tmp_path / "t.csv"
+		worker = TrackingWorker3D(src, out, (2.0, 4.0, 4.0))
+		worker.progress.connect(lambda current, total: worker.cancel() if current == 3 else None)
+
+		seen = _run_tracking_worker(worker)
+
+		assert seen["finished"] == [str(out)]
+		df = pd.read_csv(out)
+		assert df["frame"].max() == 2
+		# Both tracks run into frame 2, the last frame linked: their true
+		# end is unknown.
+		assert df["censored"].all()
+
+	def test_cancel_before_any_frame_writes_nothing(self, tmp_path):
+		from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
+
+		src = _write_spots_csv(tmp_path / "spots.csv")
+		out = tmp_path / "t.csv"
+		worker = TrackingWorker3D(src, out, (2.0, 4.0, 4.0))
+		worker.cancel()
+
+		seen = _run_tracking_worker(worker)
+
+		assert seen["finished"] == [""]
+		assert not out.exists()
+
+	def test_a_csv_missing_columns_is_refused_by_name(self, tmp_path):
+		from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
+
+		src = tmp_path / "bad.csv"
+		pd.DataFrame({"frame": [0, 1], "y": [1.0, 1.0], "x": [1.0, 1.0]}).to_csv(src, index=False)
+
+		seen = _run_tracking_worker(TrackingWorker3D(src, tmp_path / "t.csv", (2.0, 4.0, 4.0)))
+
+		assert len(seen["errored"]) == 1
+		assert "z" in seen["errored"][0]
+
+	def test_a_single_frame_is_refused(self, tmp_path):
+		from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
+
+		src = _write_spots_csv(tmp_path / "spots.csv", n_frames=1)
+
+		seen = _run_tracking_worker(TrackingWorker3D(src, tmp_path / "t.csv", (2.0, 4.0, 4.0)))
+
+		assert "two timepoints" in seen["errored"][0]
+
+	def test_an_error_keeps_an_earlier_output_file(self, tmp_path):
+		# Review focus: re-running onto an existing tracks CSV must not
+		# destroy it when the new run fails.
+		from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
+
+		src = tmp_path / "bad.csv"
+		pd.DataFrame({"frame": [0, 1], "y": [1.0, 1.0], "x": [1.0, 1.0]}).to_csv(src, index=False)
+		out = tmp_path / "t.csv"
+		out.write_text("previous run")
+
+		seen = _run_tracking_worker(TrackingWorker3D(src, out, (2.0, 4.0, 4.0)))
+
+		assert seen["errored"]
+		assert out.read_text() == "previous run"
+		assert not (tmp_path / "t.csv.partial").exists()
+
+	def test_a_dense_region_reports_the_adaptive_hint(self, tmp_path):
+		from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
+
+		rng = np.random.default_rng(0)
+		src = tmp_path / "dense.csv"
+		pd.DataFrame({
+			"frame": np.repeat([0, 1], 100),
+			"z": rng.uniform(0, 5, 200), "y": rng.uniform(0, 10, 200), "x": rng.uniform(0, 10, 200),
+		}).to_csv(src, index=False)
+
+		seen = _run_tracking_worker(TrackingWorker3D(src, tmp_path / "t.csv", (8.0, 8.0, 8.0)))
+
+		assert "Adaptive search" in seen["errored"][0]
