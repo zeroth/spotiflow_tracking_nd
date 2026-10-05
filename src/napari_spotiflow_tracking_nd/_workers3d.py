@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import shutil
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -16,6 +18,17 @@ from napari_spotiflow_tracking_nd._fitting3d import (
     paint_label_mask,
 )
 from napari_spotiflow_tracking_nd._segmentation3d import detect_spots_3d
+from napari_spotiflow_tracking_nd._track_analysis3d import (
+    MSD_COLUMNS,
+    PROPERTY_COLUMNS,
+    STEP_COLUMNS,
+    AnalysisParams,
+    analyse_track,
+    lifetime_distribution,
+)
+from napari_spotiflow_tracking_nd._track_analysis3d import (
+    missing_columns as missing_track_columns,
+)
 from napari_spotiflow_tracking_nd._tracking3d import (
     add_physical_columns,
     choose_link_coordinates,
@@ -342,6 +355,102 @@ class TrackingWorker3D(QThread):
                 partial.unlink(missing_ok=True)
             except OSError:
                 pass  # best-effort cleanup must not swallow `errored`
+            self.errored.emit(str(exc))
+
+
+def replace_dir(src: Path, dst: Path) -> None:
+    """Move the finished folder `src` to `dst`, replacing any earlier `dst`
+    only once `src` is complete — so a failed run can never leave `dst`
+    half old, half new."""
+    old = dst.with_name(dst.name + ".old")
+    if old.exists():
+        shutil.rmtree(old)
+    if dst.exists():
+        os.replace(dst, old)
+    os.replace(src, dst)
+    shutil.rmtree(old, ignore_errors=True)
+
+
+class TrackAnalysisWorker3D(QThread):
+    """Analyse a tracks CSV one track at a time and write the results
+    folder once every track is done.
+
+    Cancellation (`cancel()`) is checked between tracks and writes
+    *nothing*: unlike a cancelled tracking run, a partial analysis is a
+    biased sample (the first tracks by ID), not a longer series. Output
+    is assembled in `<folder>.partial` and swapped into place by
+    `replace_dir`, so an error never touches an earlier results folder.
+    """
+
+    progress = Signal(int, int)  # (current, total), 1-indexed current
+    # `run_finished`, not `finished` — see `VolumeOpWorker3D` for why.
+    run_finished = Signal(str)   # the results folder, or "" if cancelled
+    errored = Signal(str)
+
+    def __init__(
+        self,
+        csv_path: Path,
+        output_dir: Path,
+        params: AnalysisParams,
+        record: dict | None = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._csv_path = Path(csv_path)
+        self._output_dir = Path(output_dir)
+        self._params = params
+        self._record = dict(record or {})
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        partial = self._output_dir.with_name(self._output_dir.name + ".partial")
+        try:
+            tracks = pd.read_csv(self._csv_path)
+            missing = missing_track_columns(tracks)
+            if missing:
+                raise ValueError(
+                    f"{self._csv_path.name} is not a tracks CSV — missing "
+                    f"column(s): {', '.join(missing)}."
+                )
+            if tracks.empty:
+                raise ValueError(f"{self._csv_path.name} has no tracks.")
+
+            groups = [group for _, group in tracks.groupby("particle", sort=True)]
+            properties, msd_rows, step_rows = [], [], []
+            for i, track in enumerate(groups):
+                if self._cancelled:
+                    self.run_finished.emit("")
+                    return
+                row, msd, steps = analyse_track(track, self._params)
+                properties.append(row)
+                msd_rows.extend(msd)
+                step_rows.extend(steps)
+                self.progress.emit(i + 1, len(groups))
+
+            table = pd.DataFrame(properties, columns=PROPERTY_COLUMNS)
+            if partial.exists():
+                shutil.rmtree(partial)
+            partial.mkdir(parents=True)
+            table.to_csv(partial / "track_properties.csv", index=False)
+            lifetime_distribution(table, self._params.frame_interval_s).to_csv(
+                partial / "lifetime_distribution.csv", index=False
+            )
+            pd.DataFrame(msd_rows, columns=MSD_COLUMNS).to_csv(
+                partial / "msd_curves.csv", index=False
+            )
+            pd.DataFrame(step_rows, columns=STEP_COLUMNS).to_csv(
+                partial / "steps.csv", index=False
+            )
+            (partial / "analysis.json").write_text(
+                json.dumps(self._record, indent=2), encoding="utf-8"
+            )
+            replace_dir(partial, self._output_dir)
+            self.run_finished.emit(str(self._output_dir))
+        except Exception as exc:
+            shutil.rmtree(partial, ignore_errors=True)
             self.errored.emit(str(exc))
 
 

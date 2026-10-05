@@ -762,3 +762,144 @@ class TestTrackingWorker3D:
         seen = _run_tracking_worker(TrackingWorker3D(src, tmp_path / "t.csv", (2.0, 4.0, 4.0)))
 
         assert "two timepoints" in seen["errored"][0]
+
+
+def _write_tracks_csv(path, n_tracks=3, n_frames=12):
+    """Three jittering tracks, the first censored."""
+    rng = np.random.default_rng(0)
+    rows = []
+    for track_id in range(n_tracks):
+        for t in range(n_frames):
+            rows.append({
+                "particle": track_id, "frame": t,
+                "link_z": 5 + rng.normal(), "link_y": 10.0 * track_id + rng.normal(),
+                "link_x": 10.0, "censored": track_id == 0,
+            })
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
+def _analysis_params():
+    from napari_spotiflow_tracking_nd._track_analysis3d import AnalysisParams
+
+    return AnalysisParams(pixel_size_xy_um=0.104, voxel_size_z_um=0.210, frame_interval_s=3.0)
+
+
+def _run_analysis_worker(worker):
+    seen = {"progress": [], "finished": [], "errored": []}
+    worker.progress.connect(lambda c, t: seen["progress"].append((c, t)))
+    worker.run_finished.connect(seen["finished"].append)
+    worker.errored.connect(seen["errored"].append)
+    worker.run()
+    return seen
+
+
+RESULT_FILES = [
+    "analysis.json", "lifetime_distribution.csv", "msd_curves.csv",
+    "steps.csv", "track_properties.csv",
+]
+
+
+class TestTrackAnalysisWorker3D:
+    def test_writes_the_results_folder_and_reports_progress_per_track(self, tmp_path):
+        import json
+
+        from napari_spotiflow_tracking_nd._track_analysis3d import PROPERTY_COLUMNS
+        from napari_spotiflow_tracking_nd._workers3d import TrackAnalysisWorker3D
+
+        src = _write_tracks_csv(tmp_path / "t_tracks.csv")
+        out = tmp_path / "t_tracks_analysis"
+
+        seen = _run_analysis_worker(
+            TrackAnalysisWorker3D(src, out, _analysis_params(), record={"source_csv": str(src)})
+        )
+
+        assert seen["errored"] == []
+        assert seen["progress"] == [(1, 3), (2, 3), (3, 3)]
+        assert seen["finished"] == [str(out)]
+        assert sorted(p.name for p in out.iterdir()) == RESULT_FILES
+        props = pd.read_csv(out / "track_properties.csv")
+        assert list(props.columns) == PROPERTY_COLUMNS
+        assert props["track_id"].tolist() == [0, 1, 2]
+        assert json.loads((out / "analysis.json").read_text()) == {"source_csv": str(src)}
+        # Only the two uncensored tracks are in the lifetime distribution.
+        assert pd.read_csv(out / "lifetime_distribution.csv")["count"].sum() == 2
+
+    def test_no_partial_folder_is_left_behind(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import TrackAnalysisWorker3D
+
+        src = _write_tracks_csv(tmp_path / "t.csv")
+
+        _run_analysis_worker(TrackAnalysisWorker3D(src, tmp_path / "res", _analysis_params()))
+
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["res", "t.csv"]
+
+    def test_a_rerun_replaces_the_previous_results_folder(self, tmp_path):
+        # Review focus: an earlier run's files must not mix with this one's.
+        from napari_spotiflow_tracking_nd._workers3d import TrackAnalysisWorker3D
+
+        src = _write_tracks_csv(tmp_path / "t.csv")
+        out = tmp_path / "res"
+        out.mkdir()
+        (out / "stale.csv").write_text("from an earlier run")
+
+        _run_analysis_worker(TrackAnalysisWorker3D(src, out, _analysis_params()))
+
+        assert sorted(p.name for p in out.iterdir()) == RESULT_FILES
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["res", "t.csv"]
+
+    def test_cancel_writes_nothing(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import TrackAnalysisWorker3D
+
+        src = _write_tracks_csv(tmp_path / "t.csv")
+        out = tmp_path / "res"
+        worker = TrackAnalysisWorker3D(src, out, _analysis_params())
+        worker.progress.connect(lambda current, total: worker.cancel())
+
+        seen = _run_analysis_worker(worker)
+
+        assert seen["finished"] == [""]
+        assert not out.exists()
+        assert not (tmp_path / "res.partial").exists()
+
+    def test_a_cancel_keeps_an_earlier_results_folder(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import TrackAnalysisWorker3D
+
+        src = _write_tracks_csv(tmp_path / "t.csv")
+        out = tmp_path / "res"
+        out.mkdir()
+        (out / "earlier.csv").write_text("keep me")
+        worker = TrackAnalysisWorker3D(src, out, _analysis_params())
+        worker.cancel()
+
+        _run_analysis_worker(worker)
+
+        assert (out / "earlier.csv").read_text() == "keep me"
+
+    def test_missing_columns_are_refused_by_name_and_earlier_output_kept(self, tmp_path):
+        from napari_spotiflow_tracking_nd._workers3d import TrackAnalysisWorker3D
+
+        bad = tmp_path / "bad.csv"
+        pd.DataFrame({"particle": [0], "frame": [0]}).to_csv(bad, index=False)
+        out = tmp_path / "res"
+        out.mkdir()
+        (out / "earlier.csv").write_text("keep me")
+
+        seen = _run_analysis_worker(TrackAnalysisWorker3D(bad, out, _analysis_params()))
+
+        assert len(seen["errored"]) == 1
+        assert "link_z" in seen["errored"][0] and "censored" in seen["errored"][0]
+        assert (out / "earlier.csv").read_text() == "keep me"
+        assert not (tmp_path / "res.partial").exists()
+
+    def test_an_empty_tracks_table_is_refused(self, tmp_path):
+        from napari_spotiflow_tracking_nd._track_analysis3d import REQUIRED_COLUMNS
+        from napari_spotiflow_tracking_nd._workers3d import TrackAnalysisWorker3D
+
+        empty = tmp_path / "empty.csv"
+        pd.DataFrame(columns=list(REQUIRED_COLUMNS)).to_csv(empty, index=False)
+
+        seen = _run_analysis_worker(TrackAnalysisWorker3D(empty, tmp_path / "res", _analysis_params()))
+
+        assert "no tracks" in seen["errored"][0]
+        assert not (tmp_path / "res").exists()
