@@ -74,9 +74,21 @@ whole-movie-in-RAM) version this plugin is ported from.
 > nothing is discarded. A *preview* is a single uninterruptible call, so
 > cancelling one discards its result rather than stopping the work.
 
-Deferred to later phases: tracking (trackpy, 3D), track-property/step
-analysis, PAPA (not planned), N2V denoise, walking average, erosion
-background removal, Shapes-based crop.
+- **Spot Tracking** — links the detection CSV into tracks with trackpy,
+  frame by frame, in the background (progress, Cancel keeps the frames
+  linked so far). Pick a spots layer from detection, or **Browse CSV…**
+  to track a file without loading it. Links on the Gaussian-fit centre
+  where the fit converged (**Use fitted centres**), the detected centre
+  elsewhere; `coord_source` records which. Writes `<name>_tracks.csv` —
+  every detection column plus `link_z/y/x`, `particle` (track ID),
+  `censored` (the track touches the first or last frame, so its true
+  lifetime is unknown) and, where calibrated, `z_um, y_um, x_um,
+  time_s` — and a `<name>_tracks.json` sidecar with the calibration and
+  every parameter used. Shown as a Tracks layer at the image's scale.
+
+Deferred to later phases: track-property/step analysis, PAPA (not
+planned), N2V denoise, walking average, erosion background removal,
+Shapes-based crop.
 
 ## Install
 
@@ -155,6 +167,27 @@ back to isotropic voxels.
 Isotropic-in-µm is not automatically the right target — axial optical
 resolution is typically 2–3× worse than lateral, so a filter matched to the
 PSF's own anisotropy is also defensible. Leave the box unticked for that.
+
+### Tracking search range
+
+Linking runs in voxels, so the search range has the same problem as σ: 4
+voxels is 0.416 µm across x/y but 0.840 µm along z, and an isotropic
+4-voxel range lets a spot jump twice as far axially as laterally. Tick
+**Link to calibration** and the z range is derived from the xy one,
+
+```
+z = xy × (pixel_size_xy_um / voxel_size_z_um)
+```
+
+so 4 px becomes `(1.98, 4, 4)` — the same 0.416 µm on every axis. Unticked,
+the z range is whatever you type. Linked with blank calibration, the run
+is refused. The calibration fields prefill from the spots layer, then the
+detection CSV's sidecar; fill them in by hand for a series detected
+before calibration was applied.
+
+**Memory** is counted in timepoints, including timepoints with no spots
+at all. **Min track length** defaults to 1 — short-lived structures are
+data for lifetime analysis, not noise to drop by default.
 
 ## Tests
 

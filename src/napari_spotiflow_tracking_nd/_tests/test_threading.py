@@ -208,3 +208,64 @@ class TestRealThreading:
         assert widget._calc_run_btn.isEnabled()
         assert not widget._cancel_btn.isEnabled()
 
+
+def _write_tracking_csv(path, n_frames):
+    import pandas as pd
+
+    rows = [{"frame": t, "z": 5.0, "y": 10.0, "x": 10.0} for t in range(n_frames)]
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
+@pytest.fixture
+def tracking(make_napari_viewer, monkeypatch):
+    from napari_spotiflow_tracking_nd import _workers3d
+    from napari_spotiflow_tracking_nd._tracking_widget3d import TrackingWidget3D
+
+    # Linking is fast; slow each frame so a human-speed Cancel/close can
+    # land mid-run (see the pre-processing cancel test for why).
+    real_iter_link = _workers3d.iter_link
+
+    def _slow_iter_link(*args, **kwargs):
+        for item in real_iter_link(*args, **kwargs):
+            time.sleep(0.05)
+            yield item
+
+    monkeypatch.setattr(_workers3d, "iter_link", _slow_iter_link)
+    viewer = make_napari_viewer()
+    return TrackingWidget3D(viewer), viewer
+
+
+class TestRealThreadingTracking:
+    def test_cancelling_a_real_tracking_run_keeps_the_frames_linked(
+        self, tracking, tmp_path, qtbot
+    ):
+        widget, viewer = tracking
+        widget._set_input_csv(_write_tracking_csv(tmp_path / "spots.csv", n_frames=20))
+        widget._progress_bar.valueChanged.connect(
+            lambda value: widget._cancel_btn.click() if value == 1 else None
+        )
+
+        widget._run_tracking()
+        qtbot.waitUntil(lambda: not widget._is_running, timeout=15000)
+
+        import pandas as pd
+
+        written = pd.read_csv(tmp_path / "spots_tracks.csv")
+        assert 0 < written["frame"].nunique() < 20, "cancel should have stopped it early"
+        assert "cancelled" in viewer.layers[-1].name
+
+    def test_closing_the_tracking_widget_mid_run_does_not_crash(
+        self, tracking, tmp_path, qtbot
+    ):
+        widget, _ = tracking
+        widget._set_input_csv(_write_tracking_csv(tmp_path / "spots.csv", n_frames=20))
+        widget._progress_bar.valueChanged.connect(
+            lambda value: widget.close() if value == 1 else None
+        )
+
+        widget._run_tracking()
+        qtbot.waitUntil(lambda: not widget._is_running, timeout=15000)
+
+        assert widget._worker is None
+
