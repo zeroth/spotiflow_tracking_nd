@@ -83,8 +83,10 @@ def add_physical_columns(df: pd.DataFrame, calibration: dict) -> pd.DataFrame
   `search_range=search_range_zyx`, `memory=memory`. It yields
   `(frame, linked_frame_df)` per frame so the caller can report progress
   and stop between frames (`should_stop` is checked before each frame).
-  Frames with no spots are simply absent; trackpy tolerates gaps in
-  `frame`. With `adaptive=True` it passes `adaptive_stop=0.1 * min(search_range_zyx)`
+  **Every frame from the first to the last is fed to trackpy, a frame
+  with no spots as an empty frame.** Measured on trackpy 0.7: trackpy
+  counts `memory` in frames it has been fed, not in `frame` values, so
+  skipping a spotless frame lets `memory=0` bridge it. With `adaptive=True` it passes `adaptive_stop=0.1 * min(search_range_zyx)`
   and `adaptive_step=0.95`. trackpy's `SubnetOversizeException` is
   re-raised as a `ValueError` with a plain message: lower the search range
   or enable adaptive search.
@@ -128,13 +130,17 @@ linked frame (`120 / 349`), then `filter_short_tracks`, `flag_censored`,
 `add_physical_columns`, and write the CSV.
 
 - **Written once at the end**, not appended per frame like detection:
-  trackpy may relabel earlier rows while linking, so IDs are not final
-  until it finishes.
+  the min-length filter and the `censored` flag both need each track
+  whole. It is written to `<name>.partial` and renamed into place, so a
+  failed run neither leaves a valid-looking half table nor destroys a
+  previous run's output under the same name.
+- A run cancelled before any spot is linked writes nothing and reports
+  an empty path; the widget then adds no layer.
 - **Cancel** stops between frames; the frames linked so far are still
   filtered, flagged (series end = last frame linked) and written, and the
   layer gets the existing `[cancelled 120/349]` suffix.
-- **Errors**: the partial output file is removed — a half-written CSV that
-  looks valid is worse than none — and the message goes out on `errored`.
+- **Errors**: the `.partial` file is removed and the message goes out on
+  `errored`; any earlier file at the output path is left untouched.
 - Runs through `RunStateMixin`, including the **process-wide one-job
   lock**: tracking is CPU-only, but sharing the lock means it can never
   read a CSV a detection run is still writing.
@@ -162,7 +168,8 @@ Registered in `napari.yaml` as **Spot Tracking**. One panel, no tabs.
   Prefilled from the Points layer's metadata, else the CSV's sidecar, else
   blank (= unknown). Always editable.
 - **Linking**: search range (xy px, default 4); **Link to calibration**
-  (when ticked, z is shown read-only, e.g. `z = 1.98 px`; when unticked, a
+  (off by default, like Link σ — the user's existing sidecars are
+  uncalibrated, so on-by-default would refuse the first run; when ticked, z is shown read-only, e.g. `z = 1.98 px`; when unticked, a
   z spin box, default equal to xy, is editable; ticked with no
   calibration, Run is refused with a message, as Link σ does); memory
   (frames, default 3); min track length (default 1); **Use fitted
@@ -194,7 +201,8 @@ threading spec parked until a third widget existed.
 - Link to calibration ticked, xy or z calibration blank → refused.
 - Output path equals input path → refused.
 - `SubnetOversizeException` → plain message, nothing written.
-- Any other worker error → partial file removed, status shows the error.
+- Any other worker error → `.partial` removed, previous output kept,
+  status shows the error.
 
 ### 5. Dependency
 
