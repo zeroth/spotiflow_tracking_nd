@@ -269,3 +269,53 @@ class TestRealThreadingTracking:
 
         assert widget._worker is None
 
+
+@pytest.fixture
+def track_analysis(make_napari_viewer, monkeypatch):
+    from napari_spotiflow_tracking_nd import _workers3d
+    from napari_spotiflow_tracking_nd._track_analysis_widget3d import TrackAnalysisWidget3D
+
+    # Analysis is fast; slow each track so a human-speed Cancel can land
+    # mid-run (see the pre-processing cancel test for why).
+    real_analyse_track = _workers3d.analyse_track
+
+    def _slow_analyse_track(*args, **kwargs):
+        time.sleep(0.05)
+        return real_analyse_track(*args, **kwargs)
+
+    monkeypatch.setattr(_workers3d, "analyse_track", _slow_analyse_track)
+    viewer = make_napari_viewer()
+    return TrackAnalysisWidget3D(viewer), viewer
+
+
+class TestRealThreadingTrackAnalysis:
+    def test_cancelling_a_real_analysis_writes_nothing(self, track_analysis, tmp_path, qtbot):
+        import json
+
+        import pandas as pd
+
+        widget, _ = track_analysis
+        rows = [
+            {"particle": p, "frame": t, "link_z": 5.0, "link_y": 10.0 * p,
+             "link_x": 10.0, "censored": False}
+            for p in range(20) for t in range(5)
+        ]
+        csv = tmp_path / "spots_tracks.csv"
+        pd.DataFrame(rows).to_csv(csv, index=False)
+        csv.with_suffix(".json").write_text(json.dumps(
+            {"pixel_size_xy_um": 0.104, "voxel_size_z_um": 0.210, "frame_interval_s": 3.0}
+        ))
+        widget._set_input_csv(csv)
+        out = tmp_path / "results"
+        widget._output_dir_edit.setText(str(out))
+        widget._progress_bar.valueChanged.connect(
+            lambda value: widget._cancel_btn.click() if value == 1 else None
+        )
+
+        widget._run_analysis()
+        qtbot.waitUntil(lambda: not widget._is_running, timeout=15000)
+
+        assert not out.exists()
+        assert not (tmp_path / "results.partial").exists()
+        assert "Cancelled" in widget._status_label.text()
+

@@ -88,9 +88,21 @@ whole-movie-in-RAM) version this plugin is ported from.
   linked (so a stopped run is recognisable on disk). Shown as a Tracks layer
   at the spots layer's scale.
 
-Deferred to later phases: track-property/step analysis, PAPA (not
-planned), N2V denoise, walking average, erosion background removal,
-Shapes-based crop.
+- **Track Analysis** — turns a tracks CSV into per-track numbers, in the
+  background (progress; Cancel writes nothing). Pick a Tracks layer from
+  Spot Tracking, or **Browse CSV…**. Calibration (xy, z, dt) is required
+  and prefills from the tracks sidecar. Writes a results folder
+  (`<tracks>_analysis/`) with `track_properties.csv` (one row per track:
+  lifetime, censored, path length, net displacement, mean speed,
+  `D_3d`/`alpha_3d` and `D_xy`/`alpha_xy`, motility class, intensity and
+  step counts), `lifetime_distribution.csv` (uncensored tracks only),
+  `msd_curves.csv`, `steps.csv` and `analysis.json` (every parameter).
+  The per-track columns are also attached to the Tracks layer, so its
+  colour-by can show e.g. `lifetime_s` or `motility_class`.
+
+Deferred to later phases: interactive track exploration (filter panel,
+per-track charts), PAPA (not planned), N2V denoise, walking average,
+erosion background removal, Shapes-based crop.
 
 ## Install
 
@@ -190,6 +202,23 @@ before calibration was applied.
 **Memory** is counted in timepoints, including timepoints with no spots
 at all. **Min track length** defaults to 1 — short-lived structures are
 data for lifetime analysis, not noise to drop by default.
+
+### Track analysis conventions
+
+- **Lifetime** counts frames inclusively — a structure seen in frames
+  10–14 lives 5 frames (`lifetime_s = 5 × dt`). Censored tracks (within
+  `memory` frames of either end of the series) keep their row but are
+  left out of `lifetime_distribution.csv`.
+- **MSD** is computed per track in µm on the real frame grid — frames
+  bridged by tracking `memory` are gaps, not neighbours — for lags 1 to
+  **Max lag**. `MSD = 6·D·t^α` is fitted in 3D and `MSD = 4·D·t^α` in xy,
+  only for tracks with at least **Min spots for MSD** spots and 4 usable
+  lags. **Motility from** picks which α sets the class: `α < 0.4`
+  constrained, `α > 1.2` directed, otherwise diffusive.
+- **Intensity and steps** use the Gaussian-fit `integrated_intensity` of
+  spots whose fit converged; failed fits are gaps, never interpolated. A
+  trace shorter than `2 × Step window + 1` points is not assessed
+  (`n_steps` is blank, not 0).
 
 ## Tests
 
