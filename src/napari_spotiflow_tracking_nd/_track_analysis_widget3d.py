@@ -9,6 +9,7 @@ import napari
 import numpy as np
 import pandas as pd
 import scipy
+import trackpy
 from napari.utils.notifications import show_error, show_info, show_warning
 from qtpy.QtWidgets import (
     QComboBox,
@@ -60,7 +61,7 @@ def summarise(properties: pd.DataFrame) -> str:
     done = properties.loc[~properties["censored"].astype(bool), "lifetime_s"]
     text = f"{n} tracks — {len(done)} uncensored"
     if len(done):
-        text += f", median lifetime {done.median():.3g} s"
+        text += f", median lifetime {done.median():g} s"
     fitted = properties["motility_class"] != "unclassified"
     n_fitted = int(fitted.sum())
     text += f"; {n_fitted} with D/α"
@@ -348,6 +349,7 @@ class TrackAnalysisWidget3D(RunStateMixin, QWidget):
                 "numpy": np.__version__,
                 "pandas": pd.__version__,
                 "scipy": scipy.__version__,
+                "trackpy": trackpy.__version__,
             },
         }
         source_layer = self._source_layer
@@ -386,6 +388,10 @@ class TrackAnalysisWidget3D(RunStateMixin, QWidget):
         for column in table.columns:
             if column != "censored":
                 features[column] = features["track_id"].map(table[column]).to_numpy()
+        # napari re-applies its internal (track, time) row order on every
+        # `features` assignment. That is right here because Spot Tracking
+        # writes the layer data already sorted by (track, time), so the
+        # rows read back match the vertices they were joined to.
         layer.features = features
 
     def _on_run_finished(self, payload=None):

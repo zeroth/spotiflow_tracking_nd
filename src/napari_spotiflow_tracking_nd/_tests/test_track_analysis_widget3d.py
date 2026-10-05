@@ -242,7 +242,7 @@ class TestRun:
         assert record["step_window"] == 3 and record["step_threshold"] == 0.5
         assert record["source_csv"] == str(csv)
         assert record["tracking_cancelled"] is None
-        assert {"numpy", "scipy", "pandas", "plugin"} <= set(record["versions"])
+        assert {"numpy", "scipy", "pandas", "trackpy", "plugin"} <= set(record["versions"])
 
     def test_per_track_results_are_joined_onto_the_tracks_layer(self, analysis_widget, tmp_path):
         widget, viewer = analysis_widget
@@ -366,6 +366,15 @@ class TestSummarise:
             "4 tracks — 3 uncensored, median lifetime 15 s; "
             "3 with D/α (67% diffusive)."
         )
+
+    def test_a_long_median_lifetime_is_not_in_exponent_notation(self):
+        from napari_spotiflow_tracking_nd._track_analysis_widget3d import summarise
+
+        props = pd.DataFrame({
+            "censored": [False], "lifetime_s": [1053.0], "motility_class": ["unclassified"],
+        })
+
+        assert "median lifetime 1053 s" in summarise(props)
 
     def test_nothing_uncensored_or_fitted(self):
         from napari_spotiflow_tracking_nd._track_analysis_widget3d import summarise

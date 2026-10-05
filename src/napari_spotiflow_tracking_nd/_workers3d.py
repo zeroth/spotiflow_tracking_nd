@@ -402,7 +402,7 @@ class TrackAnalysisWorker3D(QThread):
 
     Cancellation (`cancel()`) is checked between tracks and writes
     *nothing*: unlike a cancelled tracking run, a partial analysis is a
-    biased sample (the first tracks by ID), not a longer series. Output
+    biased sample (the first tracks by ID), not a shorter series. Output
     is assembled in `<folder>.partial` and swapped into place by
     `replace_dir`, so an error never touches an earlier results folder.
     """
