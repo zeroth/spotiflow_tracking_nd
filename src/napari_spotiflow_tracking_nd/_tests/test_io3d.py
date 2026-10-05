@@ -203,3 +203,22 @@ class TestValidateOutputDir:
 
         assert out is None
         assert "input folder" in error
+
+
+class TestIsotropicZyx:
+    def test_derives_the_axial_value_from_the_calibration(self):
+        from napari_spotiflow_tracking_nd._io3d import isotropic_zyx
+
+        # Same physical distance on every axis: a 0.210 µm z-step is about
+        # twice a 0.104 µm pixel, so z gets about half the voxels.
+        assert isotropic_zyx(4.0, 0.104, 0.210) == pytest.approx((1.981, 4.0, 4.0), abs=1e-3)
+
+    def test_cubic_voxels_leave_the_value_unchanged(self):
+        from napari_spotiflow_tracking_nd._io3d import isotropic_zyx
+
+        assert isotropic_zyx(3.0, 0.1, 0.1) == pytest.approx((3.0, 3.0, 3.0))
+
+    def test_returns_plain_floats(self):
+        from napari_spotiflow_tracking_nd._io3d import isotropic_zyx
+
+        assert all(type(v) is float for v in isotropic_zyx(4, 0.104, 0.210))

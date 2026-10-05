@@ -141,6 +141,22 @@ def compute_layer_scale(
     return (1.0, float(voxel_size_z_um), float(pixel_size_xy_um), float(pixel_size_xy_um))
 
 
+def isotropic_zyx(
+    xy_value: float, pixel_size_xy_um: float, voxel_size_z_um: float
+) -> tuple[float, float, float]:
+    """A lateral length in voxels, as `(z, y, x)` voxels spanning the same
+    physical distance on every axis.
+
+    Voxels are rarely cubes — at 0.104 µm laterally against 0.210 µm
+    axially, 4 voxels span 0.416 µm across x/y but 0.840 µm along z — so a
+    σ or a search range that should be isotropic in µm needs fewer voxels
+    along z. Shared by the Pre-Processing widget's Link σ and the Tracking
+    widget's Link search range.
+    """
+    xy = float(xy_value)
+    return (xy * (float(pixel_size_xy_um) / float(voxel_size_z_um)), xy, xy)
+
+
 def validate_output_dir(folder, src_files) -> tuple[Path | None, str | None]:
     """Check an output folder, returning `(path, None)` or `(None, error)`.
 

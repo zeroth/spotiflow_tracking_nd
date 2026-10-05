@@ -23,6 +23,7 @@ from qtpy.QtWidgets import (
 from napari_spotiflow_tracking_nd._io3d import (
     build_lazy_stack_from_files,
     compute_layer_scale,
+    isotropic_zyx,
     read_volume,
     validate_output_dir,
 )
@@ -406,7 +407,7 @@ class PreProcessingWidget3D(RunStateMixin, QWidget):
             )
             return None
 
-        return (sigma_xy * (pixel_size_xy_um / voxel_size_z_um), sigma_xy, sigma_xy)
+        return isotropic_zyx(sigma_xy, pixel_size_xy_um, voxel_size_z_um)
 
     # ── Op builders ──────────────────────────────────────────────────
     # Each returns (op, kwargs, run_suffix, preview_kind). `run_suffix`
