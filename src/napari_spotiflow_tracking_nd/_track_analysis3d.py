@@ -24,6 +24,9 @@ REQUIRED_COLUMNS = ("particle", "frame", "link_z", "link_y", "link_x", "censored
 ALPHA_CONSTRAINED_MAX = 0.4
 ALPHA_DIRECTED_MIN = 1.2
 MOTILITY_CLASSES = ("constrained", "diffusive", "directed")
+#: `motility_class` as an integer: napari's colour-by cannot use a
+#: string column.
+MOTILITY_CODES = {"unclassified": 0, "constrained": 1, "diffusive": 2, "directed": 3}
 
 #: Fewer usable lags than this and an MSD fit is not attempted.
 MIN_FIT_LAGS = 4
@@ -134,7 +137,8 @@ PROPERTY_COLUMNS = [
     "track_id", "n_spots", "first_frame", "last_frame", "n_gap_frames", "censored",
     "lifetime_frames", "lifetime_s",
     "path_length_um", "net_displacement_um", "mean_speed_um_s",
-    "D_3d", "alpha_3d", "D_xy", "alpha_xy", "msd_lags_fitted", "motility_class",
+    "D_3d", "alpha_3d", "D_xy", "alpha_xy", "msd_lags_fitted",
+    "motility_class", "motility_code",
     "n_intensity_points", "mean_intensity", "max_intensity",
     "n_steps", "mean_step_height",
 ]
@@ -332,6 +336,7 @@ def analyse_track(
             })
     row["msd_lags_fitted"] = lags_fitted
     row["motility_class"] = classify_motility(row[f"alpha_{params.motility_from}"])
+    row["motility_code"] = MOTILITY_CODES[row["motility_class"]]
 
     trace_frames, trace = intensity_trace(track)
     row["n_intensity_points"] = int(trace.size)

@@ -184,6 +184,24 @@ class TestAnalyseTrackMotion:
         assert row_3d["motility_class"] == "directed"
         assert row_xy["motility_class"] == "constrained"
 
+    def test_the_motility_code_follows_the_class(self):
+        # An integer twin of `motility_class` that napari can colour by.
+        from napari_spotiflow_tracking_nd._track_analysis3d import (
+            MOTILITY_CODES,
+            PROPERTY_COLUMNS,
+            analyse_track,
+        )
+
+        assert MOTILITY_CODES == {"unclassified": 0, "constrained": 1, "diffusive": 2, "directed": 3}
+        assert PROPERTY_COLUMNS.index("motility_code") == PROPERTY_COLUMNS.index("motility_class") + 1
+        rng = np.random.default_rng(3)
+        constrained, _, _ = analyse_track(_track(rng.normal(0, 0.02, (40, 3))), PARAMS)
+        short, _, _ = analyse_track(_track(rng.normal(0, 0.1, (5, 3))), PARAMS)
+
+        assert constrained["motility_code"] == 1
+        assert short["motility_code"] == 0
+        assert isinstance(short["motility_code"], int)
+
     def test_a_short_track_is_not_fitted(self):
         from napari_spotiflow_tracking_nd._track_analysis3d import analyse_track
 

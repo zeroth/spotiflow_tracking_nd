@@ -259,6 +259,22 @@ class TestRun:
         short = features.loc[features["track_id"] == 2, "lifetime_frames"]
         assert (short == 5).all()
 
+    @pytest.mark.parametrize("column", [
+        "lifetime_s", "lifetime_frames", "n_spots",
+        "path_length_um", "net_displacement_um", "motility_code",
+    ])
+    def test_the_documented_columns_can_colour_the_tracks(self, analysis_widget, tmp_path, column):
+        # Review focus: napari's colour-by raises on a string column and
+        # hides every track when a column has any blank.
+        widget, viewer = analysis_widget
+        layer = _add_tracks_layer(viewer, _write_tracks(tmp_path))
+        widget._output_dir_edit.setText(str(_output_folder(tmp_path)))
+        widget._run_analysis()
+
+        layer.color_by = column
+
+        assert layer.track_colors[:, 3].max() > 0
+
     def test_a_rerun_overwrites_the_previous_runs_features(self, analysis_widget, tmp_path):
         widget, viewer = analysis_widget
         layer = _add_tracks_layer(viewer, _write_tracks(tmp_path))
