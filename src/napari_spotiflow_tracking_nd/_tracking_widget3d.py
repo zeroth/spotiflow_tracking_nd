@@ -30,7 +30,7 @@ from napari_spotiflow_tracking_nd._detection_widget3d import (
     calibration_sidecar_path,
 )
 from napari_spotiflow_tracking_nd._io3d import compute_layer_scale, isotropic_zyx
-from napari_spotiflow_tracking_nd._layer_utils import refresh_layer_combo
+from napari_spotiflow_tracking_nd._layer_utils import calibration_spin, refresh_layer_combo
 from napari_spotiflow_tracking_nd._run_state import RunStateMixin
 from napari_spotiflow_tracking_nd._tracking3d import LINK_COLUMNS
 from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
@@ -55,25 +55,23 @@ def same_file(a, b) -> bool:
     return os.path.normcase(str(Path(a).resolve())) == os.path.normcase(str(Path(b).resolve()))
 
 
-def read_sidecar_calibration(csv_path) -> dict:
-    """The calibration recorded in `csv_path`'s JSON sidecar; `{}` when
-    there is none or it cannot be read."""
+def read_sidecar(csv_path) -> dict:
+    """`csv_path`'s whole JSON sidecar; `{}` when there is none or it
+    cannot be read."""
     try:
         data = json.loads(calibration_sidecar_path(csv_path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    if not isinstance(data, dict):
+    return data if isinstance(data, dict) else {}
+
+
+def read_sidecar_calibration(csv_path) -> dict:
+    """The calibration recorded in `csv_path`'s JSON sidecar; `{}` when
+    there is none or it cannot be read."""
+    data = read_sidecar(csv_path)
+    if not data:
         return {}
     return {k: data.get(k) for k in CALIBRATION_KEYS}
-
-
-def _calibration_spin(maximum: float, decimals: int) -> QDoubleSpinBox:
-    spin = QDoubleSpinBox()
-    spin.setRange(0.0, maximum)
-    spin.setDecimals(decimals)
-    # 0 reads as "unknown", the Pre-Processing widget's convention.
-    spin.setSpecialValueText("unknown")
-    return spin
 
 
 class TrackingWidget3D(RunStateMixin, QWidget):
@@ -122,13 +120,13 @@ class TrackingWidget3D(RunStateMixin, QWidget):
         calib_layout = QHBoxLayout()
         calib_group.setLayout(calib_layout)
         calib_layout.addWidget(QLabel("xy (µm):"))
-        self._pixel_size_xy_spin = _calibration_spin(100.0, 4)
+        self._pixel_size_xy_spin = calibration_spin(100.0, 4)
         calib_layout.addWidget(self._pixel_size_xy_spin)
         calib_layout.addWidget(QLabel("z (µm):"))
-        self._voxel_size_z_spin = _calibration_spin(100.0, 4)
+        self._voxel_size_z_spin = calibration_spin(100.0, 4)
         calib_layout.addWidget(self._voxel_size_z_spin)
         calib_layout.addWidget(QLabel("dt (s):"))
-        self._frame_interval_spin = _calibration_spin(10000.0, 3)
+        self._frame_interval_spin = calibration_spin(10000.0, 3)
         calib_layout.addWidget(self._frame_interval_spin)
         layout.addWidget(calib_group)
 

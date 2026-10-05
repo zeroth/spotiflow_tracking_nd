@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+from qtpy.QtWidgets import QDoubleSpinBox
+
 
 def refresh_layer_combo(combo, viewer, layer_type, predicate: Callable | None = None) -> list[str]:
     """Repopulate `combo` with the names of `viewer`'s layers of
@@ -27,3 +29,13 @@ def refresh_layer_combo(combo, viewer, layer_type, predicate: Callable | None = 
     finally:
         combo.blockSignals(was_blocked)
     return names
+
+
+def calibration_spin(maximum: float, decimals: int) -> QDoubleSpinBox:
+    """A calibration field where 0 reads as "unknown" — the plugin-wide
+    convention that a blank calibration value is `None`, not zero."""
+    spin = QDoubleSpinBox()
+    spin.setRange(0.0, maximum)
+    spin.setDecimals(decimals)
+    spin.setSpecialValueText("unknown")
+    return spin
