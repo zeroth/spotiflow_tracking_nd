@@ -94,11 +94,17 @@ whole-movie-in-RAM) version this plugin is ported from.
   and prefills from the tracks sidecar. Writes a results folder
   (`<tracks>_analysis/`) with `track_properties.csv` (one row per track:
   lifetime, censored, path length, net displacement, mean speed,
-  `D_3d`/`alpha_3d` and `D_xy`/`alpha_xy`, motility class, intensity and
-  step counts), `lifetime_distribution.csv` (uncensored tracks only),
-  `msd_curves.csv`, `steps.csv` and `analysis.json` (every parameter).
-  The per-track columns are also attached to the Tracks layer, so its
-  colour-by can show e.g. `lifetime_s` or `motility_class`.
+  `D_3d`/`alpha_3d` and `D_xy`/`alpha_xy`, motility class and its
+  integer `motility_code`, intensity and step counts),
+  `lifetime_distribution.csv` (uncensored tracks only), `msd_curves.csv`,
+  `steps.csv` and `analysis.json` (every parameter). A re-run replaces
+  an earlier results folder; any other existing folder is refused and
+  left untouched — pick a new folder name. The per-track columns are
+  also attached to the Tracks layer; its colour-by can use `lifetime_s`,
+  `lifetime_frames`, `n_spots`, `path_length_um`, `net_displacement_um`
+  and `motility_code`. Columns with blanks (`D_*`, `alpha_*`,
+  `mean_speed_um_s`, the intensity and step columns) cannot be used for
+  colour-by in napari until interactive exploration (Phase 3B).
 
 Deferred to later phases: interactive track exploration (filter panel,
 per-track charts), PAPA (not planned), N2V denoise, walking average,
@@ -213,12 +219,19 @@ data for lifetime analysis, not noise to drop by default.
   bridged by tracking `memory` are gaps, not neighbours — for lags 1 to
   **Max lag**. `MSD = 6·D·t^α` is fitted in 3D and `MSD = 4·D·t^α` in xy,
   only for tracks with at least **Min spots for MSD** spots and 4 usable
-  lags. **Motility from** picks which α sets the class: `α < 0.4`
-  constrained, `α > 1.2` directed, otherwise diffusive.
+  lags, over the first quarter of the track's lags (at least 4; e.g. 7
+  for a 30-frame track) — long lags rest on few pairs and would dominate
+  the fit. `msd_curves.csv` still has every lag. **Motility from** picks
+  which α sets the class: `α < 0.4` constrained, `α > 1.2` directed,
+  otherwise diffusive (`motility_code` 1, 3, 2; 0 unclassified).
 - **Intensity and steps** use the Gaussian-fit `integrated_intensity` of
   spots whose fit converged; failed fits are gaps, never interpolated. A
   trace shorter than `2 × Step window + 1` points is not assessed
-  (`n_steps` is blank, not 0).
+  (`n_steps` is blank, not 0). Steps are detected with the 2D plugin's
+  `find_steps`, each moved by at most one point to the least-squares
+  boundary; a step's `frame` is the first frame of the new level, and
+  `dwell_before`/`dwell_after` in `steps.csv` are in frames (a failed fit
+  does not shorten a dwell).
 
 ## Tests
 

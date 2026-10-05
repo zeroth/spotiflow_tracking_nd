@@ -61,7 +61,7 @@ differences and gaps drop out of averages.
 | Identity / time | `track_id, n_spots, first_frame, last_frame, n_gap_frames, censored` |
 | Lifetime | `lifetime_frames = last_frame − first_frame + 1`; `lifetime_s = lifetime_frames × frame_interval_s` |
 | Geometry | `path_length_um` (sum of consecutive *present*-spot distances), `net_displacement_um` (first to last spot), `mean_speed_um_s = path_length_um / ((last_frame − first_frame) × frame_interval_s)` — NaN for a single-spot track |
-| Motion | `D_3d, alpha_3d, D_xy, alpha_xy, msd_lags_fitted, motility_class` |
+| Motion | `D_3d, alpha_3d, D_xy, alpha_xy, msd_lags_fitted, motility_class, motility_code` |
 | Intensity | `n_intensity_points, mean_intensity, max_intensity` |
 | Steps | `n_steps, mean_step_height` |
 
@@ -77,23 +77,38 @@ Rules:
   N-D positions). A lag with zero pairs is omitted.
 - **MSD fit**: `curve_fit` of `k·D·t^α` (`k = 6` for 3d, `4` for xy) with
   `t = L × frame_interval_s`, `p0 = (0.001, 0.01)`, bounded `maxfev`, in
-  try/except. Fitted only when the track has `≥ min_msd_spots` spots
-  (default 10) and `≥ 4` usable lags; otherwise, or on any fit failure or
-  non-finite result, `D`/`alpha` are NaN. `msd_lags_fitted` is the number
-  of lags used for the 3d fit (0 when not fitted).
+  try/except, over the first `n_fit = min(usable lags, max_lag,
+  max(4, span // 4))` usable lags (`span = last_frame − first_frame + 1`;
+  the usual "first quarter of the lags" rule — long lags rest on few,
+  overlapping pairs and would dominate an unweighted fit). Fitted only
+  when the track has `≥ min_msd_spots` spots (default 10) and `≥ 4`
+  usable lags; otherwise, or on any fit failure or non-finite result,
+  `D`/`alpha` are NaN. `msd_curves.csv` still reports every lag up to
+  `max_lag`, with `msd_fit` evaluated at each. `msd_lags_fitted` is
+  `n_fit` for the 3d fit (0 when not fitted).
 - **Motility class**: the 2D thresholds — `alpha < 0.4` constrained,
   `alpha > 1.2` directed, otherwise diffusive (boundaries diffusive),
   `unclassified` when alpha is NaN — applied to `alpha_3d` or `alpha_xy`
-  per the `motility_from` parameter.
+  per the `motility_from` parameter. `motility_code` is the same class
+  as an integer (0 unclassified, 1 constrained, 2 diffusive, 3 directed),
+  since napari's colour-by cannot use a string column.
 - **Intensity trace**: `integrated_intensity` of the track's spots with
   `converged == True` and a finite value, in frame order. Without those
   columns every track has `n_intensity_points = 0` and NaN intensities.
-- **Steps**: the 2D `find_steps(trace, window, threshold)` ported
-  unchanged, run on the intensity trace; defaults `window = 3` (2D used
-  20; at 3 s/frame a coated-pit track is ~10–30 frames), `threshold = 0.5`.
-  A trace shorter than `2 × window + 1` points gets `n_steps = NaN` and
-  `mean_step_height = NaN` — "not assessed", distinct from zero steps.
-  Step frames are reported as the frame number of the trace point.
+- **Steps**: detected with the ported 2D `find_steps(trace, window,
+  threshold)` (unchanged) on the intensity trace, each split refined by
+  ±1 point to the least-squares boundary (`find_steps` reports the last
+  point of the old level, which biased position and height); defaults
+  `window = 3` (2D used 20; at 3 s/frame a coated-pit track is ~10–30
+  frames), `threshold = 0.5`. A trace shorter than `2 × window + 1`
+  points gets `n_steps = NaN` and `mean_step_height = NaN` — "not
+  assessed", distinct from zero steps. From the refined indices: a
+  step's `frame` is the frame of the first point of the new level;
+  `level_before`/`level_after` are the means of the adjacent segments
+  between neighbouring steps; `step_height = level_after − level_before`;
+  `dwell_before`/`dwell_after` are in **frames** (from the trace's frame
+  numbers, so failed fits do not shorten them), the last level lasting
+  to the trace's last frame inclusive.
 
 **Population and detail outputs**:
 
@@ -104,7 +119,8 @@ Rules:
   least one lag: `track_id, dims, lag_frames, lag_s, msd_um2, sem,
   n_pairs, msd_fit` (`msd_fit` NaN when not fitted).
 - `steps.csv` — one row per detected step: `track_id, frame,
-  level_before, level_after, step_height, dwell_before, dwell_after`.
+  level_before, level_after, step_height, dwell_before, dwell_after`
+  (dwells in frames).
 
 ### 2. `TrackAnalysisWorker3D` — in `_workers3d.py`
 
@@ -119,8 +135,15 @@ at a time (progress `i / n_tracks`), assemble the tables, write them.
   nothing written".
 - **Atomic output**: tables are written into `<folder>.partial/`, then
   the folder is renamed into place (an existing folder of that name is
-  replaced only after the new one is complete). On error the `.partial`
-  folder is removed and any earlier results are untouched.
+  replaced only after the new one is complete, and put back if the final
+  rename fails). On error the `.partial` folder is removed and any
+  earlier results are untouched.
+- **Only earlier results are ever replaced.** An existing results folder
+  (or a stale `<folder>.old`) is replaced or deleted only when it is
+  recognisably an earlier run's — `analysis.json` plus nothing but the
+  five result files, no subfolders; a stale `<folder>.partial` only when
+  it holds nothing but result files. Anything else is refused with an
+  error, before any track is analysed, and left untouched.
 - Runs through `RunStateMixin`, sharing the process-wide one-job lock.
 
 ### 3. `TrackAnalysisWidget3D` — `_track_analysis_widget3d.py`
@@ -137,13 +160,19 @@ Registered in `napari.yaml` as **Track Analysis**.
 - **Parameters**: max lag (25), min spots for MSD (10), motility from
   (3D | xy, default 3D), step window (3), step threshold (0.5).
 - **Output folder**: defaults to `<tracks stem>_analysis` beside the
-  tracks CSV; refused when it resolves to the tracks CSV's own folder.
+  tracks CSV; refused when it resolves to the tracks CSV's own folder or
+  any folder above it, or when it exists and is not an earlier results
+  folder.
 - **Run / Cancel / progress / status** via `RunStateMixin`. Status
   summary: `N tracks — U uncensored, median lifetime X s; F with D/α
   (P % diffusive)`.
 - **Layer features**: when the input came from a Tracks layer, the
   per-track columns are joined onto its `features` by `track_id`, so
-  napari's own colour-by-feature works immediately.
+  napari's own colour-by-feature works immediately for the columns
+  without blanks (`lifetime_s, lifetime_frames, n_spots, path_length_um,
+  net_displacement_um, motility_code`). napari's colour-by raises on a
+  string column and hides every track when a column has any NaN, so the
+  others wait for 3B's exploration.
 
 `analysis.json` in the results folder records the calibration, every
 parameter, the source tracks CSV, the tracking sidecar's `cancelled`,
@@ -155,7 +184,9 @@ scipy / plugin versions.
 - Tracks CSV missing `particle, frame, link_z, link_y, link_x` or
   `censored` → refused, naming the columns.
 - Calibration incomplete → refused.
-- Output folder is the tracks CSV's folder → refused.
+- Output folder is the tracks CSV's folder or above it, or an existing
+  folder that is not an earlier results folder → refused, nothing
+  touched.
 - Tracking sidecar says `cancelled: true` → a warning; analysis runs.
 - A per-track MSD fit failure → NaN and `unclassified`, never a run
   failure. A per-track step-detection failure → NaN, never a run failure.
@@ -177,9 +208,13 @@ Synthetic tracks with known answers, no real data:
   censored tracks.
 - Short track: NaN D/α, `unclassified`, `msd_lags_fitted = 0`.
 - Steps on a synthetic two-level trace with NaN gaps → one step at the
-  right frame; a too-short trace → NaN, not 0.
+  right frame, dwells in frames; clean steps measured exactly; a
+  too-short trace → NaN, not 0.
+- 400 short (30-frame) Brownian tracks → at least 75 % diffusive.
 - No fit columns → zero intensity points, NaN intensities, NaN steps.
-- Worker: progress; cancel writes nothing; error leaves earlier output.
+- Worker: progress; cancel writes nothing; error leaves earlier output;
+  an existing non-results folder (or stale `.old` / `.partial`) refused
+  and untouched.
 - Widget (via `_launch_worker` seam): calibration prefill order;
   incomplete-calibration refusal; output-folder refusal; `features`
   joined onto the Tracks layer; cancelled-tracking warning.
