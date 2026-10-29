@@ -130,6 +130,91 @@ def load_folder_as_lazy_stack(
     return build_lazy_stack_from_files(list_timepoint_files(folder, pattern))
 
 
+_MICRON_UNITS = {"micron", "microns", "um", "µm", "µm", "\\u00B5m"}
+
+
+def probe_hyperstack(path: str | Path) -> dict | None:
+    """Describe a single-file (T, Z, Y, X) hyperstack — a SlideBook/Fiji
+    export holding the whole timeseries — or return None if `path` isn't
+    one (a 3D volume, a multichannel stack, not a TIFF at all).
+
+    Returns:
+        {"shape", "dtype", "pixel_size_xy_um", "voxel_size_z_um",
+        "frame_interval_s"}, the calibration values `None` wherever the
+        file doesn't record them in microns / seconds.
+    """
+    try:
+        with tifffile.TiffFile(str(path)) as tf:
+            series = tf.series[0]
+            if series.axes != "TZYX":
+                return None
+            ij = tf.imagej_metadata or {}
+            xres = series.pages[0].tags.get("XResolution")
+            xres = xres.value if xres is not None else None
+            info = {"shape": tuple(series.shape), "dtype": series.dtype}
+    except (OSError, ValueError, tifffile.TiffFileError):
+        return None
+
+    in_microns = str(ij.get("unit", "")).strip() in _MICRON_UNITS
+    pixel_xy = None
+    # (1, 1) is what writers store when they have no calibration at all.
+    if in_microns and xres and xres[0] and tuple(xres) != (1, 1):
+        pixel_xy = xres[1] / xres[0]
+    spacing = ij.get("spacing")
+    finterval = ij.get("finterval")
+    info["pixel_size_xy_um"] = float(pixel_xy) if pixel_xy else None
+    info["voxel_size_z_um"] = float(spacing) if in_microns and spacing else None
+    info["frame_interval_s"] = float(finterval) if finterval else None
+    return info
+
+
+def split_hyperstack(path: str | Path) -> list[Path]:
+    """Write a (T, Z, Y, X) hyperstack out as one (Z, Y, X) TIFF per
+    timepoint, in a `<stem>_timepoints` folder beside it, and return the
+    files in timepoint order.
+
+    Every widget in this plugin streams one file per timepoint — previews
+    read `source_files[t]`, writers mirror `output_dir / input.name` — so a
+    single-file export is turned into that layout once, rather than
+    teaching each widget a second one. Reopening reuses the split while
+    every file is present, the right shape, and newer than the source;
+    otherwise it is rewritten. Each file is written under a temporary name
+    and renamed into place, so an interrupted split never leaves a
+    truncated volume that would pass for a complete one.
+    """
+    path = Path(path)
+    with tifffile.TiffFile(str(path)) as tf:
+        series = tf.series[0]
+        n_t, n_z = series.shape[:2]
+        volume_shape, dtype = tuple(series.shape[1:]), series.dtype
+
+        out_dir = path.with_name(f"{path.stem}_timepoints")
+        out_dir.mkdir(exist_ok=True)
+        files = [out_dir / f"timepoint_T_{t:04d}_.tif" for t in range(n_t)]
+        source_mtime = path.stat().st_mtime_ns
+
+        for t, out in enumerate(files):
+            if _is_current_split(out, volume_shape, dtype, source_mtime):
+                continue
+            volume = tf.asarray(series=0, key=range(t * n_z, (t + 1) * n_z))
+            partial = out.with_name(out.name + ".partial")
+            tifffile.imwrite(
+                str(partial), volume.reshape(volume_shape),
+                imagej=True, metadata={"axes": "ZYX"},
+            )
+            partial.replace(out)
+    return files
+
+
+def _is_current_split(out: Path, shape, dtype, source_mtime: int) -> bool:
+    try:
+        if out.stat().st_mtime_ns < source_mtime:
+            return False
+        return probe_volume_shape(out) == (shape, dtype)
+    except (OSError, ValueError, tifffile.TiffFileError):
+        return False
+
+
 def compute_layer_scale(
     pixel_size_xy_um: float | None, voxel_size_z_um: float | None
 ) -> tuple[float, float, float, float]:

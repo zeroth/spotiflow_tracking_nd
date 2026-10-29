@@ -120,3 +120,116 @@ class TestReadVolumeTimeseries:
 
         with pytest.raises(Exception):  # tifffile's own TiffFileError
             reader(str(tmp_path))
+
+
+def _write_hyperstack(path, shape=(3, 4, 8, 8), calibrated=True):
+    """A single (T, Z, Y, X) ImageJ hyperstack, like a SlideBook/Fiji
+    export, with values that encode their own timepoint so a mis-ordered
+    split is caught."""
+    data = np.zeros(shape, dtype=np.uint16)
+    for t in range(shape[0]):
+        data[t] = np.arange(np.prod(shape[1:]), dtype=np.uint16).reshape(shape[1:]) + 100 * t
+    kwargs = {}
+    metadata = {"axes": "TZYX"}
+    if calibrated:
+        kwargs["resolution"] = (1 / 0.104, 1 / 0.104)
+        metadata.update(unit="micron", spacing=0.21, finterval=3.0)
+    tifffile.imwrite(str(path), data, imagej=True, metadata=metadata, **kwargs)
+    return data
+
+
+class TestHyperstack:
+    def test_accepts_a_single_tzyx_hyperstack(self, tmp_path):
+        from napari_spotiflow_tracking_nd._reader3d import get_reader
+
+        path = tmp_path / "Capture 2 - Green.tif"  # no `_T_<n>_` token
+        _write_hyperstack(path)
+
+        assert get_reader(str(path)) is not None
+
+    def test_declines_a_folder_holding_only_a_hyperstack(self, tmp_path):
+        from napari_spotiflow_tracking_nd._reader3d import get_reader
+
+        _write_hyperstack(tmp_path / "Capture 2 - Green.tif")
+
+        assert get_reader(str(tmp_path)) is None
+
+    def test_splits_into_per_timepoint_files_beside_the_source(self, tmp_path):
+        from napari_spotiflow_tracking_nd._reader3d import get_reader
+
+        path = tmp_path / "Capture 2 - Green.tif"
+        data = _write_hyperstack(path)
+
+        (stack, attrs, layer_type), = get_reader(str(path))(str(path))
+
+        files = attrs["metadata"]["source_files"]
+        assert layer_type == "image"
+        assert stack.shape == data.shape
+        assert len(files) == data.shape[0]
+        assert all(f.parent == tmp_path / "Capture 2 - Green_timepoints" for f in files)
+        for t, f in enumerate(files):
+            np.testing.assert_array_equal(tifffile.imread(str(f)), data[t])
+        np.testing.assert_array_equal(np.asarray(stack), data)
+        assert attrs["name"] == "Capture 2 - Green"
+
+    def test_reads_calibration_from_the_imagej_metadata(self, tmp_path):
+        from napari_spotiflow_tracking_nd._reader3d import get_reader
+
+        path = tmp_path / "stack.tif"
+        _write_hyperstack(path)
+
+        (_, attrs, _), = get_reader(str(path))(str(path))
+
+        meta = attrs["metadata"]
+        assert meta["pixel_size_xy_um"] == pytest.approx(0.104, rel=1e-4)
+        assert meta["voxel_size_z_um"] == pytest.approx(0.21)
+        assert meta["frame_interval_s"] == pytest.approx(3.0)
+        assert attrs["scale"] == pytest.approx((1.0, 0.21, 0.104, 0.104), rel=1e-4)
+
+    def test_uncalibrated_hyperstack_opens_at_unit_scale(self, tmp_path):
+        from napari_spotiflow_tracking_nd._reader3d import get_reader
+
+        path = tmp_path / "stack.tif"
+        _write_hyperstack(path, calibrated=False)
+
+        (_, attrs, _), = get_reader(str(path))(str(path))
+
+        assert attrs["scale"] == (1.0, 1.0, 1.0, 1.0)
+        assert attrs["metadata"]["pixel_size_xy_um"] is None
+        assert attrs["metadata"]["voxel_size_z_um"] is None
+
+    def test_reopening_reuses_the_split_instead_of_rewriting(self, tmp_path):
+        from napari_spotiflow_tracking_nd._reader3d import get_reader
+
+        path = tmp_path / "stack.tif"
+        _write_hyperstack(path)
+        (_, attrs, _), = get_reader(str(path))(str(path))
+        mtimes = [f.stat().st_mtime_ns for f in attrs["metadata"]["source_files"]]
+
+        (_, attrs, _), = get_reader(str(path))(str(path))
+
+        assert [f.stat().st_mtime_ns for f in attrs["metadata"]["source_files"]] == mtimes
+
+    def test_a_stale_split_from_a_different_stack_is_rewritten(self, tmp_path):
+        from napari_spotiflow_tracking_nd._reader3d import get_reader
+
+        path = tmp_path / "stack.tif"
+        _write_hyperstack(path, shape=(2, 4, 8, 8))
+        get_reader(str(path))(str(path))
+        data = _write_hyperstack(path, shape=(3, 5, 8, 8))
+
+        (stack, attrs, _), = get_reader(str(path))(str(path))
+
+        assert stack.shape == data.shape
+        np.testing.assert_array_equal(np.asarray(stack), data)
+
+    def test_a_multichannel_hyperstack_is_declined(self, tmp_path):
+        from napari_spotiflow_tracking_nd._reader3d import get_reader
+
+        path = tmp_path / "two_channel.tif"
+        tifffile.imwrite(
+            str(path), np.zeros((2, 4, 2, 8, 8), dtype=np.uint16),
+            imagej=True, metadata={"axes": "TZCYX"},
+        )
+
+        assert get_reader(str(path)) is None
