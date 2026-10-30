@@ -8,7 +8,7 @@ time.
 Sibling project: napari-spotiflow-tracking — the 2D (single-plane,
 whole-movie-in-RAM) version this plugin is ported from.
 
-## Status: Phase 1
+## Features
 
 - **Data loading** — a folder of per-timepoint TIFFs opens as a single
   lazy `(T, Z, Y, X)` image layer (`dask`-backed; nothing is loaded until
@@ -104,11 +104,7 @@ whole-movie-in-RAM) version this plugin is ported from.
   `lifetime_frames`, `n_spots`, `path_length_um`, `net_displacement_um`
   and `motility_code`. Columns with blanks (`D_*`, `alpha_*`,
   `mean_speed_um_s`, the intensity and step columns) cannot be used for
-  colour-by in napari until interactive exploration (Phase 3B).
-
-Deferred to later phases: interactive track exploration (filter panel,
-per-track charts), PAPA (not planned), N2V denoise, walking average,
-erosion background removal, Shapes-based crop.
+  colour-by in napari.
 
 ## Install
 
@@ -160,7 +156,7 @@ Pre-Processing widget's **Apply Calibration** action, which sets the
 selected layer's `scale` (for correct 3D aspect ratio) and its metadata —
 works on a layer opened through the reader, or built any other way, as
 long as it carries the same metadata keys. Frame interval (s) is carried
-in layer metadata for later phases. None of these are hard-coded — enter
+in layer metadata and used by tracking and track analysis. None of these are hard-coded — enter
 the values for your own acquisition.
 
 ### Link σ to calibration
