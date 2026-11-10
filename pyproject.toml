@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "napari-spotiflow-tracking-nd"
-version = "0.1.0"
+version = "0.1.1"
 description = "Napari plugin for 3D-volume-timeseries spot detection and tracking using Spotiflow and trackpy"
 requires-python = ">=3.9"
 license = { text = "BSD-3-Clause" }
