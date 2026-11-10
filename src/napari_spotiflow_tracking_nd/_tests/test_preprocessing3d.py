@@ -305,3 +305,84 @@ class TestApplyCalculation:
 
         with pytest.raises(ValueError):
             apply_calculation(np.zeros((2, 4, 4), dtype=np.uint16), "multiply", 2)
+
+
+def _hazy_spots_volume(dtype=np.uint16):
+    """A sloping background plus small bright spots narrower than radius 4."""
+    z, y, x = np.mgrid[:12, :48, :48].astype(np.float64)
+    vol = 200.0 + 4.0 * y + 2.0 * x + 5.0 * z
+    for cz, cy, cx in [(5, 12, 12), (6, 30, 34), (4, 36, 10)]:
+        vol += 1000.0 * np.exp(
+            -((z - cz) ** 2 + (y - cy) ** 2 + (x - cx) ** 2) / (2 * 1.0 ** 2)
+        )
+    return vol.astype(dtype)
+
+
+@pytest.fixture(params=["rolling_ball", "erosion"])
+def morph_bg(request):
+    from napari_spotiflow_tracking_nd import _preprocessing3d as p
+
+    return {
+        "rolling_ball": p.remove_background_rolling_ball_3d,
+        "erosion": p.remove_background_erosion_3d,
+    }[request.param]
+
+
+class TestMorphologicalBackground3D:
+    """Rolling ball and erosion (opening) share one contract."""
+
+    def test_preserves_dtype_and_shape(self, morph_bg):
+        vol = _hazy_spots_volume()
+        out = morph_bg(vol, radius=4.0)
+        assert out.dtype == vol.dtype
+        assert out.shape == vol.shape
+
+    def test_removes_the_sloping_background_and_keeps_spots(self, morph_bg):
+        vol = _hazy_spots_volume()
+        out = morph_bg(vol, radius=4.0).astype(np.float64)
+        # Far from any spot, the ramp (which spans ~400 counts) is gone, to
+        # within 10% — a ball riding a steep slope sits a little above it.
+        assert np.median(out) < 40
+        # Spots keep most of their 1000-count height above background.
+        for c in [(5, 12, 12), (6, 30, 34), (4, 36, 10)]:
+            assert out[c] > 700
+
+    def test_result_is_never_negative(self, morph_bg):
+        vol = _hazy_spots_volume(np.float32)
+        assert morph_bg(vol, radius=4.0).min() >= 0
+
+    def test_accepts_anisotropic_radius_tuple(self, morph_bg):
+        vol = _hazy_spots_volume()
+        out = morph_bg(vol, radius=(2.0, 4.0, 4.0))
+        assert out.shape == vol.shape
+
+    def test_flat_volume_goes_to_zero(self, morph_bg):
+        vol = np.full((6, 20, 20), 500, dtype=np.uint16)
+        assert not morph_bg(vol, radius=3.0).any()
+
+    def test_wrong_ndim_raises(self, morph_bg):
+        with pytest.raises(ValueError, match="3D"):
+            morph_bg(np.zeros((8, 8)), radius=2.0)
+
+    def test_non_positive_radius_raises(self, morph_bg):
+        with pytest.raises(ValueError, match="radius"):
+            morph_bg(_hazy_spots_volume(), radius=0.0)
+
+
+class TestRollingBallShrink:
+    def test_large_radius_matches_unshrunk_rolling_ball(self):
+        """The shrink-then-interpolate shortcut stays close to skimage's
+        full-resolution rolling ball on a smooth background."""
+        from skimage.restoration import ellipsoid_kernel, rolling_ball
+
+        from napari_spotiflow_tracking_nd._preprocessing3d import (
+            remove_background_rolling_ball_3d,
+        )
+
+        vol = _hazy_spots_volume()
+        out = remove_background_rolling_ball_3d(vol, radius=10.0)
+        background = rolling_ball(
+            vol.astype(np.float64), kernel=ellipsoid_kernel((21, 21, 21), 10.0)
+        )
+        ref = np.maximum(vol - background, 0)
+        assert np.percentile(np.abs(out.astype(np.float64) - ref), 99) < 25

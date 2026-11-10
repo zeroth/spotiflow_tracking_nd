@@ -16,6 +16,7 @@ dependencies = [
     "pandas",
     "dask",
     "scipy",
+    "scikit-image>=0.19",  # rolling_ball / ellipsoid_kernel
     "tifffile",
     "trackpy>=0.6",
 ]

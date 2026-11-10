@@ -31,11 +31,22 @@ from napari_spotiflow_tracking_nd._preprocessing3d import (
     _get_device,
     apply_calculation,
     gaussian_blur_3d,
+    remove_background_erosion_3d,
     remove_background_high_pass_3d,
+    remove_background_rolling_ball_3d,
 )
 from napari_spotiflow_tracking_nd._layer_utils import refresh_layer_combo
 from napari_spotiflow_tracking_nd._run_state import RunStateMixin
 from napari_spotiflow_tracking_nd._workers3d import FunctionWorker3D, VolumeOpWorker3D
+
+# Background-removal methods: label → (size label, layer-name prefix,
+# preview kind). Only the high-pass takes σ and runs on the GPU; the other
+# two take a radius in voxels and run on the CPU.
+BG_METHODS = {
+    "Gaussian high-pass": ("sigma:", "bg s", "bg"),
+    "Rolling ball": ("radius:", "rolling ball r", "rolling ball"),
+    "Erosion (top-hat)": ("radius:", "tophat r", "tophat"),
+}
 
 
 class PreProcessingWidget3D(RunStateMixin, QWidget):
@@ -102,8 +113,9 @@ class PreProcessingWidget3D(RunStateMixin, QWidget):
 
         self._link_sigma_check = QCheckBox("Link σ to calibration")
         self._link_sigma_check.setToolTip(
-            "σ is in voxels, and voxels are rarely cubes. With this on, "
-            "the σ below is the lateral value and the axial one is derived "
+            "σ (and the rolling-ball / erosion radius) is in voxels, and "
+            "voxels are rarely cubes. With this on, the value below is the "
+            "lateral one and the axial one is derived "
             "from the calibration, so the filter covers the same physical "
             "distance on every axis."
         )
@@ -111,10 +123,24 @@ class PreProcessingWidget3D(RunStateMixin, QWidget):
         layout.addWidget(calib_group)
 
         # ── Background removal ───────────────────────────────────────
-        bg_group = QGroupBox("Background Removal (3D high-pass)")
+        bg_group = QGroupBox("Background Removal (3D)")
         bg_layout = QHBoxLayout()
         bg_group.setLayout(bg_layout)
-        bg_layout.addWidget(QLabel("sigma:"))
+        self._bg_method_combo = QComboBox()
+        self._bg_method_combo.addItems(list(BG_METHODS))
+        self._bg_method_combo.setToolTip(
+            "Gaussian high-pass: subtract a blurred copy (σ), re-baselined "
+            "onto the volume's mean.\n"
+            "Rolling ball: subtract what a ball of this radius rolled under "
+            "the intensity surface can reach.\n"
+            "Erosion (top-hat): subtract an erosion-then-dilation with a box "
+            "of this half-width.\n"
+            "For rolling ball and erosion, use a radius larger than the "
+            "biggest spot; their output has its background at 0."
+        )
+        bg_layout.addWidget(self._bg_method_combo)
+        self._bg_size_label = QLabel("sigma:")
+        bg_layout.addWidget(self._bg_size_label)
         self._bg_sigma_spin = QDoubleSpinBox()
         self._bg_sigma_spin.setRange(0.1, 200.0)
         self._bg_sigma_spin.setValue(10.0)
@@ -198,10 +224,17 @@ class PreProcessingWidget3D(RunStateMixin, QWidget):
         self._bg_preview_btn.clicked.connect(self._preview_remove_background)
         self._blur_preview_btn.clicked.connect(self._preview_gaussian_blur)
         self._calc_preview_btn.clicked.connect(self._preview_arithmetic)
+        self._bg_method_combo.currentTextChanged.connect(self._on_bg_method_changed)
         # Populate once up front: `layers.events.inserted` only fires for
         # layers added *after* this point, so a widget opened on a viewer
         # that already has images would otherwise start with an empty combo.
         self._refresh_image_combo()
+
+    def _on_bg_method_changed(self, method: str):
+        self._bg_size_label.setText(BG_METHODS[method][0])
+        # Only the high-pass has a GPU path; greying the box out says so
+        # instead of letting a ticked box imply the others use it.
+        self._bg_use_gpu_check.setEnabled(method == "Gaussian high-pass")
 
     def _refresh_image_combo(self, event=None):
         refresh_layer_combo(self._image_combo, self.viewer, napari.layers.Image)
@@ -412,17 +445,26 @@ class PreProcessingWidget3D(RunStateMixin, QWidget):
     # replace one layer instead of stacking one per parameter value.
 
     def _bg_op(self, layer):
+        method = self._bg_method_combo.currentText()
+        _, prefix, kind = BG_METHODS[method]
+        # σ and radius are both in voxels, so "Link σ to calibration"
+        # derives the axial value of either the same way.
+        size = self._sigma_for(self._bg_sigma_spin.value(), layer)
+        if size is None:
+            return None
+        suffix = f"{prefix}={self._sigma_label(size)}"
+        if method == "Rolling ball":
+            return remove_background_rolling_ball_3d, {"radius": size}, suffix, kind
+        if method == "Erosion (top-hat)":
+            return remove_background_erosion_3d, {"radius": size}, suffix, kind
         # `_get_device` falls back to "cpu" when CUDA isn't actually
         # available, instead of erroring deep inside the torch call.
         device = _get_device(use_gpu=self._bg_use_gpu_check.isChecked())
-        sigma = self._sigma_for(self._bg_sigma_spin.value(), layer)
-        if sigma is None:
-            return None
         return (
             remove_background_high_pass_3d,
-            {"sigma": sigma, "device": device},
-            f"bg s={self._sigma_label(sigma)}",
-            "bg",
+            {"sigma": size, "device": device},
+            suffix,
+            kind,
         )
 
     def _blur_op(self, layer):

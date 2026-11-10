@@ -148,6 +148,145 @@ def _remove_background_torch_3d(volume, sigma_z, sigma_y, sigma_x, device, torch
     return _rebaseline(residual, volume)
 
 
+# Rolling ball is computed on a shrunken copy (ImageJ's trick): a 3D ball is
+# not separable, so its cost grows with the cube of the radius — radius 10 on
+# a 20×256×256 volume already takes ~12 s at full resolution. Each axis is
+# shrunk by block-minimum so the ball rolled there is at most about this
+# many voxels in radius, then the background is interpolated back up. The
+# background is smooth by construction, so the loss is negligible.
+_ROLLING_BALL_MAX_SHRUNK_RADIUS = 5.0
+
+
+def _require_3d(volume: np.ndarray) -> None:
+    if volume.ndim != 3:
+        raise ValueError(f"Expected 3D (Z,Y,X) volume, got {volume.ndim}D")
+
+
+def _positive_radius_zyx(radius) -> tuple[float, float, float]:
+    radii = _sigma_zyx(radius)
+    if any(r <= 0 for r in radii):
+        raise ValueError(f"radius must be positive on every axis, got {radius!r}")
+    return radii
+
+
+def _subtract_background(volume: np.ndarray, background: np.ndarray) -> np.ndarray:
+    """`volume - background`, floored at 0 and cast back to the input dtype.
+
+    Unlike the Gaussian high-pass, the residual of a rolling ball or an
+    opening is non-negative by construction (the background never rises
+    above the signal), so it is *not* re-baselined: background sits at 0
+    and spots keep their height above it. The floor only absorbs
+    interpolation overshoot; integer dtypes are then clipped to range.
+    """
+    residual = np.maximum(volume.astype(np.float64) - background, 0.0)
+    if np.issubdtype(volume.dtype, np.integer):
+        info = np.iinfo(volume.dtype)
+        residual = np.clip(np.rint(residual), info.min, info.max)
+    return residual.astype(volume.dtype)
+
+
+def _block_min(volume: np.ndarray, factors: tuple[int, int, int]) -> np.ndarray:
+    """Downsample by taking the minimum of each `factors`-sized block.
+
+    The edge is padded by replication up to a whole number of blocks.
+    Minimum, not mean, so a spot can't lift the shrunken background.
+    """
+    pads = [(0, (-n) % f) for n, f in zip(volume.shape, factors)]
+    v = np.pad(volume, pads, mode="edge")
+    (nz, ny, nx), (fz, fy, fx) = v.shape, factors
+    return v.reshape(nz // fz, fz, ny // fy, fy, nx // fx, fx).min(axis=(1, 3, 5))
+
+
+def remove_background_rolling_ball_3d(
+    volume: np.ndarray,
+    radius: float | tuple[float, float, float] = 10.0,
+) -> np.ndarray:
+    """Remove background from a single (Z, Y, X) volume with a rolling ball.
+
+    The background is what a ball rolled underneath the intensity surface
+    can reach (skimage's `rolling_ball`); anything narrower than the ball —
+    the spots — is left in the residual. Use a radius larger than the
+    biggest spot.
+
+    Args:
+        volume: 3D array (Z, Y, X).
+        radius: ball radius in voxels — one float, or (r_z, r_y, r_x) for an
+            ellipsoid on anisotropic voxels. The ball's height in intensity
+            units equals its lateral radius, as in ImageJ.
+
+    Returns:
+        `volume - background`, non-negative, in the input dtype (see
+        `_subtract_background`).
+
+    Raises:
+        ValueError: if `volume` is not 3D or any radius is non-positive.
+    """
+    from skimage.restoration import ellipsoid_kernel, rolling_ball
+    from skimage.transform import resize
+
+    _require_3d(volume)
+    radii = _positive_radius_zyx(radius)
+
+    factors = tuple(
+        max(1, int(np.ceil(r / _ROLLING_BALL_MAX_SHRUNK_RADIUS))) for r in radii
+    )
+    shrunk_radii = [r / f for r, f in zip(radii, factors)]
+    semi_axes = [max(1, int(round(r))) for r in shrunk_radii]
+    # `ellipsoid_kernel` takes full extents and uses `shape // 2` as the
+    # semi-axes; its `intensity` is the ball's height (lateral radius).
+    kernel = ellipsoid_kernel(
+        tuple(2 * a + 1 for a in semi_axes), intensity=shrunk_radii[2]
+    )
+
+    small = _block_min(volume.astype(np.float64), factors)
+    background = rolling_ball(small, kernel=kernel)
+    if any(f > 1 for f in factors):
+        padded_shape = tuple(s * f for s, f in zip(small.shape, factors))
+        background = resize(
+            background, padded_shape, order=1, mode="edge",
+            anti_aliasing=False, preserve_range=True,
+        )
+        background = background[tuple(slice(0, n) for n in volume.shape)]
+    return _subtract_background(volume, background)
+
+
+def remove_background_erosion_3d(
+    volume: np.ndarray,
+    radius: float | tuple[float, float, float] = 10.0,
+) -> np.ndarray:
+    """Remove background from a single (Z, Y, X) volume by grey-scale
+    erosion followed by dilation (a morphological opening; the result is a
+    white top-hat).
+
+    Erosion alone (a local minimum) is a background estimate, but it is
+    biased low everywhere the background varies, and subtracting it leaves
+    a halo around every spot. Dilating it back with the same box restores
+    the background's level while still leaving out anything narrower than
+    the box. Both filters use a flat cuboid, which is separable — this is
+    fast at any radius.
+
+    Args:
+        volume: 3D array (Z, Y, X).
+        radius: half-width of the box in voxels — one float, or
+            (r_z, r_y, r_x). The box is `2 * round(r) + 1` voxels per axis;
+            use a radius larger than the biggest spot.
+
+    Returns:
+        `volume - opening`, non-negative, in the input dtype.
+
+    Raises:
+        ValueError: if `volume` is not 3D or any radius is non-positive.
+    """
+    from scipy.ndimage import grey_dilation, grey_erosion
+
+    _require_3d(volume)
+    radii = _positive_radius_zyx(radius)
+    size = tuple(2 * int(round(r)) + 1 for r in radii)
+    eroded = grey_erosion(volume, size=size, mode="nearest")
+    background = grey_dilation(eroded, size=size, mode="nearest")
+    return _subtract_background(volume, background)
+
+
 def gaussian_blur_3d(
     volume: np.ndarray, sigma: float | tuple[float, float, float]
 ) -> np.ndarray:

@@ -18,8 +18,9 @@ whole-movie-in-RAM) version this plugin is ported from.
   prompt for input, the layer opens at unit scale; use the Pre-Processing
   widget's **Apply Calibration** action afterward to set pixel size, voxel
   size and frame interval on it.
-- **Pre-processing** — background removal (3D high-pass), Gaussian blur,
-  and add/subtract arithmetic, each streamed volume-by-volume and written
+- **Pre-processing** — 3D background removal (Gaussian high-pass, rolling
+  ball, or erosion/top-hat — see below), Gaussian blur, and add/subtract
+  arithmetic, each streamed volume-by-volume and written
   to an output folder of per-timepoint TIFFs (same filenames as the
   input — no zarr).
 - **Quick mode (Preview)** — every operation, and detection, has a
@@ -159,9 +160,35 @@ long as it carries the same metadata keys. Frame interval (s) is carried
 in layer metadata and used by tracking and track analysis. None of these are hard-coded — enter
 the values for your own acquisition.
 
+### Background removal methods
+
+Pick the method in the Background Removal box; all three work on one
+`(Z, Y, X)` volume at a time.
+
+- **Gaussian high-pass** (σ) — subtracts a Gaussian-blurred copy, then
+  re-baselines onto the volume's own mean so the output keeps its
+  intensity level. The only method with a GPU path.
+- **Rolling ball** (radius) — subtracts what a ball rolled under the
+  intensity surface can reach (scikit-image's `rolling_ball`; the ball's
+  height in intensity units equals its lateral radius, as in ImageJ). A 3D
+  ball is not separable, so for speed the volume is shrunk by block-minimum
+  until the ball is at most ~5 voxels in radius, rolled there, and the
+  background interpolated back up — the same trick ImageJ uses. On a steep
+  intensity slope the ball rides slightly above the floor.
+- **Erosion (top-hat)** (radius) — grey-scale erosion followed by dilation
+  with a flat box of `2·radius + 1` voxels per axis (a morphological
+  opening), subtracted from the volume. Plain erosion would leave a halo
+  around each spot; dilating it back removes that. Fast at any radius.
+
+For the last two, choose a radius larger than the biggest spot. Their
+output is `volume − background`, floored at 0 and **not** re-baselined:
+background sits at 0 and spots keep their height above it. Output layers
+are named `bg s=…`, `rolling ball r=…` or `tophat r=…`.
+
 ### Link σ to calibration
 
-σ for background removal and Gaussian blur is measured in **voxels**, and
+σ for background removal and Gaussian blur — and the rolling-ball /
+erosion radius, which links the same way — is measured in **voxels**, and
 voxels are rarely cubes — at 0.104 µm laterally against 0.210 µm axially, a
 σ of 4 spans 0.416 µm across x/y but 0.840 µm along z. The filter is then
 isotropic in array indices and twice as wide in z in physical space, which

@@ -134,6 +134,45 @@ class TestRunRemoveBackground:
         assert len(list((tmp_path / "out_bg").iterdir())) == 2
         assert len(viewer.layers) == 2
 
+    @pytest.mark.parametrize(
+        "method, prefix",
+        [("Rolling ball", "rolling ball r=2"), ("Erosion (top-hat)", "tophat r=2")],
+    )
+    def test_morphological_methods_write_and_name_the_layer(
+        self, preproc_widget, tmp_path, method, prefix
+    ):
+        widget, viewer = preproc_widget
+        write_timepoint_folder(tmp_path / "in", n_timepoints=2, shape=(4, 16, 16))
+
+        _add_and_select(widget, viewer, tmp_path / "in")
+        widget._output_folder_edit.setText(str(tmp_path / "out_bg"))
+        widget._bg_method_combo.setCurrentText(method)
+        widget._bg_sigma_spin.setValue(2.0)
+
+        widget._run_remove_background()
+
+        assert len(list((tmp_path / "out_bg").iterdir())) == 2
+        assert prefix in viewer.layers[-1].name
+
+
+class TestBackgroundMethodSelector:
+    def test_defaults_to_the_gaussian_high_pass(self, preproc_widget):
+        widget, _ = preproc_widget
+        assert widget._bg_method_combo.currentText() == "Gaussian high-pass"
+        assert widget._bg_size_label.text() == "sigma:"
+
+    @pytest.mark.parametrize("method", ["Rolling ball", "Erosion (top-hat)"])
+    def test_radius_methods_relabel_the_size_and_disable_gpu(
+        self, preproc_widget, method
+    ):
+        widget, _ = preproc_widget
+        widget._bg_method_combo.setCurrentText(method)
+        assert widget._bg_size_label.text() == "radius:"
+        assert not widget._bg_use_gpu_check.isEnabled()
+
+        widget._bg_method_combo.setCurrentText("Gaussian high-pass")
+        assert widget._bg_use_gpu_check.isEnabled()
+
 
 class TestRunGaussianBlur:
     def test_writes_output_folder(self, preproc_widget, tmp_path):
@@ -474,6 +513,17 @@ class TestLinkSigmaToCalibration:
         sigma = widget._bg_op(layer)[1]["sigma"]
 
         assert sigma == pytest.approx((10.0 * 0.104 / 0.210, 10.0, 10.0))
+
+    def test_rolling_ball_radius_links_as_well(self, preproc_widget, tmp_path):
+        widget, viewer = preproc_widget
+        layer = self._calibrated(widget, viewer, tmp_path)
+        widget._bg_method_combo.setCurrentText("Rolling ball")
+        widget._bg_sigma_spin.setValue(10.0)
+        widget._link_sigma_check.setChecked(True)
+
+        radius = widget._bg_op(layer)[1]["radius"]
+
+        assert radius == pytest.approx((10.0 * 0.104 / 0.210, 10.0, 10.0))
 
     def test_isotropic_voxels_leave_sigma_effectively_unchanged(
         self, preproc_widget, tmp_path
