@@ -138,6 +138,20 @@ def _write_hyperstack(path, shape=(3, 4, 8, 8), calibrated=True):
     return data
 
 
+def _truncate_to_first_ifd(path):
+    """Zero the first IFD's next-IFD pointer, giving the single-IFD layout
+    ImageJ writes for stacks over 4 GB (classic little-endian TIFF)."""
+    import struct
+
+    with tifffile.TiffFile(str(path)) as tf:
+        page = tf.pages[0]
+        assert not tf.is_bigtiff and tf.byteorder == "<"
+        next_ptr = page.offset + 2 + 12 * len(page.tags)
+    with open(path, "r+b") as fh:
+        fh.seek(next_ptr)
+        fh.write(struct.pack("<I", 0))
+
+
 class TestHyperstack:
     def test_accepts_a_single_tzyx_hyperstack(self, tmp_path):
         from napari_spotiflow_tracking_nd._reader3d import get_reader
@@ -221,6 +235,25 @@ class TestHyperstack:
         (stack, attrs, _), = get_reader(str(path))(str(path))
 
         assert stack.shape == data.shape
+        np.testing.assert_array_equal(np.asarray(stack), data)
+
+    def test_splits_a_single_ifd_imagej_hyperstack(self, tmp_path):
+        # ImageJ saves stacks over 4 GB with only the first IFD; every other
+        # plane is raw data following it. tifffile then sees one page, so
+        # the split can't index planes by page number.
+        from napari_spotiflow_tracking_nd._reader3d import get_reader
+
+        path = tmp_path / "Capture 8 - C=0.tif"
+        data = _write_hyperstack(path)
+        _truncate_to_first_ifd(path)
+        with tifffile.TiffFile(str(path)) as tf:
+            assert len(tf.pages) == 1
+            assert tf.series[0].shape == data.shape
+
+        (stack, attrs, _), = get_reader(str(path))(str(path))
+
+        for t, f in enumerate(attrs["metadata"]["source_files"]):
+            np.testing.assert_array_equal(tifffile.imread(str(f)), data[t])
         np.testing.assert_array_equal(np.asarray(stack), data)
 
     def test_a_multichannel_hyperstack_is_declined(self, tmp_path):

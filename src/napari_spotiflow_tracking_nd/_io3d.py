@@ -193,10 +193,25 @@ def split_hyperstack(path: str | Path) -> list[Path]:
         files = [out_dir / f"timepoint_T_{t:04d}_.tif" for t in range(n_t)]
         source_mtime = path.stat().st_mtime_ns
 
+        # Uncompressed, contiguous pixel data (ImageJ's own layout) is
+        # memory-mapped, so each volume is read straight from its byte
+        # range. This is the only way to reach planes in an ImageJ stack
+        # over 4 GB: ImageJ writes just the first IFD there, so tifffile
+        # sees a single page and page-indexed reads fail past plane 0.
+        mapped = None
+        if series.dataoffset is not None:
+            mapped = np.memmap(
+                str(path), dtype=dtype.newbyteorder(tf.byteorder), mode="r",
+                offset=series.dataoffset, shape=(n_t, *volume_shape),
+            )
+
         for t, out in enumerate(files):
             if _is_current_split(out, volume_shape, dtype, source_mtime):
                 continue
-            volume = tf.asarray(series=0, key=range(t * n_z, (t + 1) * n_z))
+            if mapped is not None:
+                volume = np.asarray(mapped[t], dtype=dtype)
+            else:
+                volume = tf.asarray(series=0, key=range(t * n_z, (t + 1) * n_z))
             partial = out.with_name(out.name + ".partial")
             tifffile.imwrite(
                 str(partial), volume.reshape(volume_shape),
