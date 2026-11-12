@@ -32,13 +32,16 @@ whole-movie-in-RAM) version this plugin is ported from.
   one per click, and the detection model stays loaded between previews.
   Previews run on a worker thread too, so the UI stays live while one is
   in flight.
-- **Spot detection** — [Spotiflow](https://github.com/weigertlab/spotiflow)
-  3D models, picked from a drop-down of the built-ins (`synth_3d`,
-  `smfish_3d`) or set to a custom checkpoint folder (the drop-down is
-  editable; **Browse…** fills it in). Runs per volume, exported to a CSV
-  (`frame, z, y, x, prob`) and loaded back as a Points layer. The calibration in force for the run is written beside the
-  CSV as a JSON sidecar (`spots.csv` → `spots.json`) and carried on the
-  Points layer's metadata.
+- **Spot detection** — choose a **Method**:
+  [Spotiflow](https://github.com/weigertlab/spotiflow) 3D models, picked
+  from a drop-down of the built-ins (`synth_3d`, `smfish_3d`) or set to a
+  custom checkpoint folder (the drop-down is editable; **Browse…** fills it
+  in), or the model-free **LoG** / **DoG** filters (see below). Runs per
+  volume, exported to a CSV (`frame, z, y, x, prob`, plus `response, snr`
+  for LoG/DoG) and loaded back as a Points layer. The calibration in force
+  for the run, and the detection method and its parameters, are written
+  beside the CSV as a JSON sidecar (`spots.csv` → `spots.json`); the
+  calibration is also carried on the Points layer's metadata.
 - **Gaussian fitting (optional)** — fits a 3D Gaussian to each detected
   spot and adds its refined centre, per-axis σ, amplitude, local
   background and analytic integrated intensity to the spots CSV. Roughly
@@ -210,6 +213,34 @@ back to isotropic voxels.
 Isotropic-in-µm is not automatically the right target — axial optical
 resolution is typically 2–3× worse than lateral, so a filter matched to the
 PSF's own anisotropy is also defensible. Leave the box unticked for that.
+
+### LoG / DoG detection
+
+Model-free alternatives to Spotiflow: no weights, no GPU, and every number
+has a direct physical reading. Both are **single-scale**, as in TrackMate:
+you give the expected spot size and the volume is filtered once at it.
+
+- **spot σ z / xy** — the spot's Gaussian σ in **voxels**, set separately
+  because z steps are usually coarser (roughly the spot radius / 1.5).
+- **threshold (SNR)** — a spot is kept when its filter response is at least
+  this many times the volume's background noise. The noise is estimated
+  per volume from the response's median absolute deviation, so the
+  threshold carries across datasets and through photobleaching without
+  retuning. Default 5.
+- **min_distance** — shared with Spotiflow: no two spots closer than this
+  many voxels on any axis (the brighter one wins). Spots touching the
+  volume's edge are kept.
+
+**LoG** is scale-normalised per axis (`−Σ σᵢ² ∂²/∂xᵢ²` of the volume),
+built from second-derivative kernels corrected to sum to zero, so a bright
+flat region gives zero response. **DoG** is `G(σ) − G(1.6 σ)`, a slightly
+softer and faster approximation. Both are scaled so that, for a
+spot matching σ, **`response` ≈ the spot's peak brightness above the local
+background**, and `snr = response / noise`. LoG/DoG have no probability,
+so `prob` is blank in their CSVs.
+
+On CPU, one 201 × 1644 × 1320 volume takes about 55 s with LoG and 40 s
+with DoG, and needs about 7 GB / 5 GB of RAM beyond the volume itself.
 
 ### Tracking search range
 

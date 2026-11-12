@@ -290,7 +290,9 @@ class TestCalibrationIsThreadedThrough:
 
         sidecar = calibration_sidecar_path(tmp_path / "spots.csv")
         assert sidecar == tmp_path / "spots.json"
-        assert json.loads(sidecar.read_text()) == {
+        data = json.loads(sidecar.read_text())
+        assert data.pop("detection")["method"] == "spotiflow"
+        assert data == {
             "pixel_size_xy_um": 0.104,
             "voxel_size_z_um": 0.210,
             "frame_interval_s": 2.5,
@@ -313,7 +315,9 @@ class TestCalibrationIsThreadedThrough:
 
         self._run(widget, viewer, tmp_path, {})
 
-        assert json.loads(calibration_sidecar_path(tmp_path / "spots.csv").read_text()) == {
+        data = json.loads(calibration_sidecar_path(tmp_path / "spots.csv").read_text())
+        data.pop("detection")
+        assert data == {
             "pixel_size_xy_um": None,
             "voxel_size_z_um": None,
             "frame_interval_s": None,
@@ -779,3 +783,106 @@ class TestMaskFolderGuards:
 
         assert "vol (spot mask preview)" not in viewer.layers
         assert "vol (spot preview)" in viewer.layers
+
+
+def _spot_series(folder, n_timepoints=2, shape=(12, 32, 32), centre=(6, 16, 10)):
+    """Real (not mocked) noisy volumes with one Gaussian spot each."""
+    folder.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(0)
+    zz, yy, xx = np.indices(shape)
+    z0, y0, x0 = centre
+    spot = 100 * np.exp(-((zz - z0) ** 2 / 8 + (yy - y0) ** 2 / 4.5 + (xx - x0) ** 2 / 4.5))
+    files = []
+    for t in range(n_timepoints):
+        path = folder / f"vol_T_{t:03d}_C_00.tif"
+        tifffile.imwrite(str(path), (50 + spot + rng.normal(0, 3, shape)).astype(np.uint16))
+        files.append(path)
+    return files
+
+
+class TestClassicalMethods:
+    """LoG and DoG: model-free detection next to Spotiflow."""
+
+    @staticmethod
+    def _setup(widget, viewer, tmp_path, method):
+        files = _spot_series(tmp_path / "in")
+        viewer.add_image(
+            np.zeros((2, 12, 32, 32), dtype=np.uint16), name="vol",
+            scale=(1.0, 0.210, 0.104, 0.104), metadata={"source_files": files},
+        )
+        widget._image_combo.setCurrentText("vol")
+        widget._method_combo.setCurrentIndex(widget._method_combo.findData(method))
+        widget._sigma_z_spin.setValue(2.0)
+        widget._sigma_xy_spin.setValue(1.5)
+        widget._threshold_spin.setValue(5.0)
+        widget._csv_path_edit.setText(str(tmp_path / "spots.csv"))
+        return files
+
+    def test_offers_spotiflow_log_and_dog_defaulting_to_spotiflow(self, detection_widget):
+        widget, _ = detection_widget
+        combo = widget._method_combo
+        assert [combo.itemData(i) for i in range(combo.count())] == ["spotiflow", "log", "dog"]
+        assert combo.currentData() == "spotiflow"
+
+    def test_only_the_chosen_methods_settings_are_shown(self, detection_widget):
+        widget, _ = detection_widget
+        assert not widget._model_group.isHidden()
+        assert not widget._prob_thresh_spin.isHidden()
+        assert widget._classical_group.isHidden()
+
+        widget._method_combo.setCurrentIndex(widget._method_combo.findData("log"))
+
+        assert widget._model_group.isHidden()
+        assert widget._prob_thresh_spin.isHidden()
+        assert not widget._classical_group.isHidden()
+        # min_distance applies to every method.
+        assert not widget._min_distance_spin.isHidden()
+
+    @pytest.mark.parametrize("method", ["log", "dog"])
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_run_detects_without_loading_a_model(
+        self, mock_load_model, method, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        self._setup(widget, viewer, tmp_path, method)
+
+        widget._run_detection()
+
+        mock_load_model.assert_not_called()
+        df = pd.read_csv(tmp_path / "spots.csv")
+        assert len(df) == 2
+        assert (df[["z", "y", "x"]].to_numpy() == [6, 16, 10]).all()
+        assert df["prob"].isna().all()
+        points = [l for l in viewer.layers if l.__class__.__name__ == "Points"][0]
+        assert "snr" in points.properties and "response" in points.properties
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_sidecar_records_the_method_and_its_parameters(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        self._setup(widget, viewer, tmp_path, "dog")
+        widget._min_distance_spin.setValue(3)
+
+        widget._run_detection()
+
+        data = json.loads((tmp_path / "spots.json").read_text())
+        assert data["detection"] == {
+            "method": "dog", "sigma_zyx": [2.0, 1.5, 1.5], "threshold_snr": 5.0,
+            "dog_sigma_ratio": 1.6, "min_distance": 3,
+        }
+        assert "pixel_size_xy_um" in data
+
+    @patch("napari_spotiflow_tracking_nd._detection_widget3d.load_model")
+    def test_preview_uses_the_classical_detector(
+        self, mock_load_model, detection_widget, tmp_path
+    ):
+        widget, viewer = detection_widget
+        self._setup(widget, viewer, tmp_path, "log")
+
+        widget._run_preview()
+
+        mock_load_model.assert_not_called()
+        preview = viewer.layers["vol (spot preview)"]
+        assert np.array_equal(preview.data, [[6, 16, 10]])
+        assert not (tmp_path / "spots.csv").exists()

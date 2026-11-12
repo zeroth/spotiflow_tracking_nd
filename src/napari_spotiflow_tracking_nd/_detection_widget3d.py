@@ -31,6 +31,7 @@ from napari_spotiflow_tracking_nd._fitting3d import (
 from napari_spotiflow_tracking_nd._preprocessing3d import _get_device
 from napari_spotiflow_tracking_nd._segmentation3d import (
     PRETRAINED_3D_MODELS,
+    ClassicalDetector3D,
     detect_spots_3d,
     load_model,
 )
@@ -42,6 +43,17 @@ from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D, FunctionW
 # layer, and written to the CSV's sidecar, so a later phase can turn
 # pixel/frame track properties into physical units.
 CALIBRATION_KEYS = ("pixel_size_xy_um", "voxel_size_z_um", "frame_interval_s")
+
+# (key, label) for the Method drop-down. "spotiflow" uses a trained model;
+# "log" / "dog" are model-free filters (`ClassicalDetector3D`).
+DETECTION_METHODS = (
+    ("spotiflow", "Spotiflow (deep learning)"),
+    ("log", "LoG (Laplacian of Gaussian)"),
+    ("dog", "DoG (Difference of Gaussians)"),
+)
+
+# Optional per-spot columns copied onto the Points layer when present.
+_POINT_PROPERTY_COLUMNS = ("prob", "response", "snr")
 
 
 def calibration_sidecar_path(csv_path: str | Path) -> Path:
@@ -75,7 +87,23 @@ class DetectionWidget3D(RunStateMixin, QWidget):
         io_layout.addWidget(self._image_combo)
         layout.addWidget(io_group)
 
+        method_group = QGroupBox("Method")
+        method_layout = QHBoxLayout()
+        method_group.setLayout(method_layout)
+        self._method_combo = QComboBox()
+        for key, label in DETECTION_METHODS:
+            self._method_combo.addItem(label, key)
+        self._method_combo.setToolTip(
+            "Spotiflow: a trained deep-learning model.\n"
+            "LoG / DoG: model-free filters tuned by the expected spot size; "
+            "no GPU or weights needed. DoG is a slightly faster, softer "
+            "approximation of LoG."
+        )
+        method_layout.addWidget(self._method_combo)
+        layout.addWidget(method_group)
+
         model_group = QGroupBox("Model")
+        self._model_group = model_group
         model_layout = QHBoxLayout()
         model_group.setLayout(model_layout)
         # Editable: the drop-down offers Spotiflow's built-in 3D models,
@@ -102,7 +130,8 @@ class DetectionWidget3D(RunStateMixin, QWidget):
         params_group = QGroupBox("Detection parameters")
         params_layout = QHBoxLayout()
         params_group.setLayout(params_layout)
-        params_layout.addWidget(QLabel("prob_thresh:"))
+        self._prob_thresh_label = QLabel("prob_thresh:")
+        params_layout.addWidget(self._prob_thresh_label)
         self._prob_thresh_spin = QDoubleSpinBox()
         self._prob_thresh_spin.setRange(0.0, 1.0)
         self._prob_thresh_spin.setSingleStep(0.05)
@@ -114,6 +143,42 @@ class DetectionWidget3D(RunStateMixin, QWidget):
         self._min_distance_spin.setValue(2)
         params_layout.addWidget(self._min_distance_spin)
         layout.addWidget(params_group)
+
+        classical_group = QGroupBox("LoG / DoG parameters")
+        self._classical_group = classical_group
+        classical_layout = QHBoxLayout()
+        classical_group.setLayout(classical_layout)
+        sigma_tip = (
+            "Expected spot size as a Gaussian sigma, in voxels: z and xy "
+            "separately, since z steps are usually coarser. Roughly the "
+            "spot radius / 1.5."
+        )
+        classical_layout.addWidget(QLabel("spot σ z:"))
+        self._sigma_z_spin = QDoubleSpinBox()
+        self._sigma_z_spin.setRange(0.3, 30.0)
+        self._sigma_z_spin.setSingleStep(0.1)
+        self._sigma_z_spin.setValue(1.5)
+        self._sigma_z_spin.setToolTip(sigma_tip)
+        classical_layout.addWidget(self._sigma_z_spin)
+        classical_layout.addWidget(QLabel("xy:"))
+        self._sigma_xy_spin = QDoubleSpinBox()
+        self._sigma_xy_spin.setRange(0.3, 30.0)
+        self._sigma_xy_spin.setSingleStep(0.1)
+        self._sigma_xy_spin.setValue(1.5)
+        self._sigma_xy_spin.setToolTip(sigma_tip)
+        classical_layout.addWidget(self._sigma_xy_spin)
+        classical_layout.addWidget(QLabel("threshold (SNR):"))
+        self._threshold_spin = QDoubleSpinBox()
+        self._threshold_spin.setRange(0.5, 1000.0)
+        self._threshold_spin.setSingleStep(0.5)
+        self._threshold_spin.setValue(5.0)
+        self._threshold_spin.setToolTip(
+            "Keep spots whose filter response is at least this many times "
+            "the volume's background noise (estimated per volume, robustly). "
+            "Raise it to drop faint or noisy detections."
+        )
+        classical_layout.addWidget(self._threshold_spin)
+        layout.addWidget(classical_group)
 
         fit_group = QGroupBox("Gaussian fit")
         fit_layout = QVBoxLayout()
@@ -199,12 +264,49 @@ class DetectionWidget3D(RunStateMixin, QWidget):
         )
 
     def _connect_events(self):
+        self._method_combo.currentIndexChanged.connect(self._update_method_controls)
+        self._update_method_controls()
         self.viewer.layers.events.inserted.connect(self._refresh_image_combo)
         self.viewer.layers.events.removed.connect(self._refresh_image_combo)
         # Populate once up front: in the normal workflow the folder is
         # loaded in the Pre-Processing widget *before* this one is opened,
         # so waiting on `layers.events.inserted` leaves the combo empty.
         self._refresh_image_combo()
+
+    def _method(self) -> str:
+        return self._method_combo.currentData()
+
+    def _update_method_controls(self, *_):
+        """Show only the settings the chosen method uses."""
+        spotiflow = self._method() == "spotiflow"
+        self._model_group.setVisible(spotiflow)
+        self._prob_thresh_label.setVisible(spotiflow)
+        self._prob_thresh_spin.setVisible(spotiflow)
+        self._classical_group.setVisible(not spotiflow)
+
+    def _detector_and_params(self, device: str):
+        """(zero-arg detector loader, sidecar params) for the chosen method,
+        read from the controls as of the call.
+
+        A classical detector is cheap to build, so its loader just returns
+        it; a Spotiflow model is loaded on the worker's thread.
+        """
+        min_distance = self._min_distance_spin.value()
+        if self._method() == "spotiflow":
+            model_name = self._model_combo.currentText()
+            params = {
+                "method": "spotiflow", "model": model_name,
+                "prob_thresh": self._prob_thresh_spin.value(),
+                "min_distance": min_distance,
+            }
+            return self._model_loader(model_name, device), params
+        sigma_xy = self._sigma_xy_spin.value()
+        detector = ClassicalDetector3D(
+            method=self._method(),
+            sigma_zyx=(self._sigma_z_spin.value(), sigma_xy, sigma_xy),
+            threshold=self._threshold_spin.value(),
+        )
+        return (lambda: detector), {**detector.params(), "min_distance": min_distance}
 
     def _refresh_image_combo(self, event=None):
         refresh_layer_combo(self._image_combo, self.viewer, napari.layers.Image)
@@ -278,7 +380,6 @@ class DetectionWidget3D(RunStateMixin, QWidget):
         t = max(0, min(t, len(files) - 1))
 
         device = _get_device(use_gpu=self._use_gpu_check.isChecked())
-        model_name = self._model_combo.currentText()
 
         # Read on the main thread, as of the click. The spin boxes stay
         # live during a run, so reading them inside the worker would hand
@@ -292,7 +393,7 @@ class DetectionWidget3D(RunStateMixin, QWidget):
             self._patch_radius_xy_spin.value(),
             self._patch_radius_xy_spin.value(),
         )
-        load_the_model = self._model_loader(model_name, device)
+        load_the_model, _params = self._detector_and_params(device)
 
         def _detect():
             model = load_the_model()
@@ -398,7 +499,7 @@ class DetectionWidget3D(RunStateMixin, QWidget):
         # `_get_device` falls back to "cpu" when CUDA isn't actually
         # available, instead of erroring deep inside Spotiflow.
         device = _get_device(use_gpu=self._use_gpu_check.isChecked())
-        model_name = self._model_combo.currentText()
+        load_detector, detection_params = self._detector_and_params(device)
 
         # Passed as a callable, not a loaded model: resolving it is slow
         # enough to freeze the UI on its own, so `DetectionWorker3D` calls
@@ -406,7 +507,7 @@ class DetectionWidget3D(RunStateMixin, QWidget):
         # job runs at a time.
         worker = DetectionWorker3D(
             files=files,
-            model=self._model_loader(model_name, device),
+            model=load_detector,
             csv_path=Path(csv_path),
             prob_thresh=self._prob_thresh_spin.value(),
             min_distance=self._min_distance_spin.value(),
@@ -425,13 +526,14 @@ class DetectionWidget3D(RunStateMixin, QWidget):
                 return
 
             calibration = {k: layer.metadata.get(k) for k in CALIBRATION_KEYS}
+            sidecar_data = {**calibration, "detection": detection_params}
             # The CSV's coordinates are in pixels/frames; the calibration
             # that turns them into µm/seconds lives only in the layer's
             # metadata, which doesn't survive to disk. Record it beside the
             # CSV so a later phase (and anyone re-opening the CSV) has it.
             sidecar = calibration_sidecar_path(written_csv_path)
             try:
-                sidecar.write_text(json.dumps(calibration, indent=2), encoding="utf-8")
+                sidecar.write_text(json.dumps(sidecar_data, indent=2), encoding="utf-8")
             except OSError as exc:
                 show_error(f"Could not write the calibration sidecar {sidecar}: {exc}")
 
@@ -447,7 +549,9 @@ class DetectionWidget3D(RunStateMixin, QWidget):
                 name=f"{layer.name} (spots){self.cancelled_suffix()}",
                 scale=layer.scale,
                 metadata={"csv_path": written_csv_path, **calibration},
-                properties={"prob": df["prob"].to_numpy()},
+                properties={
+                    c: df[c].to_numpy() for c in _POINT_PROPERTY_COLUMNS if c in df.columns
+                },
             )
             show_info(f"Detected {len(df)} spots across {df['frame'].nunique()} timepoints.")
 

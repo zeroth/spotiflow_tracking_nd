@@ -38,7 +38,7 @@ from napari_spotiflow_tracking_nd._workers3d import TrackingWorker3D
 #: Per-spot columns carried onto the Tracks layer as `features`, when the
 #: tracks CSV has them — enough to colour tracks by fit quality or flag.
 FEATURE_COLUMNS = (
-    "coord_source", "prob", "censored",
+    "coord_source", "prob", "response", "snr", "censored",
     "amplitude", "integrated_intensity", "background",
 )
 

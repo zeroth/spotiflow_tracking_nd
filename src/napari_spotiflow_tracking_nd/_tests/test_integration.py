@@ -109,7 +109,9 @@ def test_preprocessing_output_layer_is_consumable_by_the_detection_widget(
     assert list(df["frame"]) == [0, 0, 1, 1, 2, 2]
     assert df["frame"].dtype.kind == "i"
 
-    assert json.loads(calibration_sidecar_path(csv_path).read_text()) == {
+    sidecar = json.loads(calibration_sidecar_path(csv_path).read_text())
+    assert sidecar.pop("detection")["method"] == "spotiflow"
+    assert sidecar == {
         "pixel_size_xy_um": 0.104,
         "voxel_size_z_um": 0.210,
         "frame_interval_s": 2.5,

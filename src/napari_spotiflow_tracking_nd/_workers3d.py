@@ -90,7 +90,8 @@ class VolumeOpWorker3D(QThread):
 
 
 class DetectionWorker3D(QThread):
-    """Stream Spotiflow 3D detection over a folder of per-timepoint TIFFs,
+    """Stream 3D spot detection (a Spotiflow model, or a LoG/DoG
+    `ClassicalDetector3D`: anything with the same `predict`) over a folder of per-timepoint TIFFs,
     appending each timepoint's spots to a CSV as they're found so a long
     run's progress survives a cancel or a crash.
     """
@@ -237,6 +238,14 @@ class DetectionWorker3D(QThread):
             "x": coords[:, 2],
             "prob": np.asarray(details.prob).reshape(-1),
         }
+        # LoG/DoG detectors (`ClassicalDetector3D`) have no probability —
+        # `prob` is NaN, written blank — and report their filter response
+        # and signal-to-noise ratio instead. Checked as real arrays, not
+        # `hasattr`, so a Spotiflow `details` adds no columns.
+        for extra in ("response", "snr"):
+            value = getattr(details, extra, None)
+            if isinstance(value, np.ndarray):
+                columns[extra] = value.reshape(-1)
         if fits is not None:
             # `z, y, x` stay as detected; the refined centre is separate,
             # so nothing downstream shifts when fitting is turned on.

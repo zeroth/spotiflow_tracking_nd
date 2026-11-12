@@ -198,6 +198,40 @@ class TestDetectionWorker3D:
         assert errors == ["model exploded"]
 
 
+class TestDetectionWorkerClassical:
+    """A LoG/DoG detector goes through the same worker as a Spotiflow model."""
+
+    def test_writes_blank_prob_and_response_snr_columns(self, tmp_path):
+        import tifffile
+
+        from napari_spotiflow_tracking_nd._segmentation3d import ClassicalDetector3D
+        from napari_spotiflow_tracking_nd._workers3d import DetectionWorker3D
+
+        rng = np.random.default_rng(0)
+        zz, yy, xx = np.indices((12, 32, 32))
+        spot = 100 * np.exp(-((zz - 6) ** 2 / 8 + (yy - 16) ** 2 / 4.5 + (xx - 10) ** 2 / 4.5))
+        files = []
+        for t in range(2):
+            vol = (50 + spot + rng.normal(0, 3, spot.shape)).astype(np.uint16)
+            path = tmp_path / f"vol_T_{t:03d}_.tif"
+            tifffile.imwrite(str(path), vol)
+            files.append(path)
+
+        det = ClassicalDetector3D("log", sigma_zyx=(2.0, 1.5, 1.5), threshold=5.0)
+        worker = DetectionWorker3D(files=files, model=det, csv_path=tmp_path / "spots.csv")
+        errors = []
+        worker.errored.connect(errors.append)
+        worker.run()
+
+        assert errors == []
+        df = pd.read_csv(tmp_path / "spots.csv")
+        assert list(df.columns) == ["frame", "z", "y", "x", "prob", "response", "snr"]
+        assert list(df["frame"]) == [0, 1]
+        assert df["prob"].isna().all()
+        assert (df[["z", "y", "x"]].to_numpy() == [6, 16, 10]).all()
+        assert (df["snr"] >= 5).all()
+
+
 class TestFunctionWorker3D:
     def test_emits_the_callables_return_value(self):
         from napari_spotiflow_tracking_nd._workers3d import FunctionWorker3D
