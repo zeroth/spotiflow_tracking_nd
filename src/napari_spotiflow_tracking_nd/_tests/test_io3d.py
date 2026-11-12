@@ -23,6 +23,20 @@ class TestListTimepointFiles:
             "stack_T_002_C_00.tif", "stack_T_009_C_00.tif", "stack_T_010_C_00.tif",
         ]
 
+    def test_accepts_frame_token(self, tmp_path):
+        """Aurora/SlideBook cube exports name timepoints `_Frame_<n>_`."""
+        from napari_spotiflow_tracking_nd._io3d import list_timepoint_files
+
+        for t in (10, 2, 9):
+            tifffile.imwrite(
+                str(tmp_path / f"250828_Wavelength_561_Frame_{t:02d}_amdII_Current.cube.tif"),
+                np.zeros((2, 4, 4), dtype=np.uint16),
+            )
+
+        files = list_timepoint_files(tmp_path)
+
+        assert [f.name.split("_Frame_")[1][:2] for f in files] == ["02", "09", "10"]
+
     def test_no_matching_files_raises(self, tmp_path):
         from napari_spotiflow_tracking_nd._io3d import list_timepoint_files
 

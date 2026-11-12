@@ -69,7 +69,7 @@ def get_reader(path):
         if hyperstack is not None:
             return _make_hyperstack_reader(candidate, hyperstack)
 
-    # Not a recognised series (no `_T_<n>_` token, or a different
+    # Not a recognised series (no `_T_<n>_`/`_Frame_<n>_` token, or a different
     # extension) nor a TZYX hyperstack — decline, so another reader
     # (e.g. napari's builtin TIFF reader) can try it.
     return None

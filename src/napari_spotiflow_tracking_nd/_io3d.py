@@ -8,17 +8,18 @@ import numpy as np
 import tifffile
 from dask import delayed
 
-_TIMEPOINT_RE = re.compile(r"_T_(\d+)_")
+# `_T_<n>_` (lattice/SPIM exports) or `_Frame_<n>_` (Aurora cube exports).
+_TIMEPOINT_RE = re.compile(r"_(?:T|Frame)_(\d+)_")
 
 
 def list_timepoint_files(folder: str | Path, pattern: str = "*.tif") -> list[Path]:
     """Return files in `folder` matching `pattern`, ordered by the numeric
-    `_T_<n>_` token in their filename (a plain lexicographic sort would put
-    `_T_10_` before `_T_9_`).
+    `_T_<n>_` or `_Frame_<n>_` token in their filename (a plain
+    lexicographic sort would put `_T_10_` before `_T_9_`).
 
     Raises:
         FileNotFoundError: no file in `folder` matches `pattern`.
-        ValueError: a matching file has no `_T_<n>_` token in its name.
+        ValueError: a matching file has no timepoint token in its name.
     """
     folder = Path(folder)
     files = list(folder.glob(pattern))
@@ -29,7 +30,7 @@ def list_timepoint_files(folder: str | Path, pattern: str = "*.tif") -> list[Pat
         match = _TIMEPOINT_RE.search(path.name)
         if match is None:
             raise ValueError(
-                f"{path.name!r} has no '_T_<n>_' timepoint token in its "
+                f"{path.name!r} has no '_T_<n>_' or '_Frame_<n>_' timepoint token in its "
                 "filename; cannot order it into a timeseries."
             )
         return int(match.group(1))
